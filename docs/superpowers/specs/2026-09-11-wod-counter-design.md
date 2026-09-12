@@ -68,7 +68,7 @@ A concrete prescription that fills in the variable fields for one movement in on
 **Seeding note:** `Movement`s are the stable catalog; `Exercise`s are the per-WOD prescriptions. Adding a new WOD = add a few `Exercise` rows referencing existing `Movement`s. `displayLabel` is pre-rendered so synced data renders identically on every device without re-formatting logic.
 
 ### `Workout`
-A named set of `Exercise`s with a mode (predefined benchmark OR user-created).
+A named set of `RoundBlock`s with a mode (predefined benchmark OR user-created).
 | Field | Type | Notes |
 |---|---|---|
 | id | UUID | PK |
@@ -76,19 +76,14 @@ A named set of `Exercise`s with a mode (predefined benchmark OR user-created).
 | description | String? | e.g. "AMRAP 20 min" / "For time" |
 | category | String? | `Girl` / `Hero` / `Custom` — drives grouping and the seed library |
 | mode | `ExecutionMode` | `.forTime` or `.topTime` |
-| exercises | [Exercise] | ordered list; the *full* working order including rest blocks |
+| blocks | [RoundBlock] | ordered; for-time blocks loop until clock, top-time play once |
 | isBuiltin | Bool | benchmark presets vs. user WODs |
 | createdAt / updatedAt | Date | |
-
-The `exercises` list can encode **both** a continuous scheme *and* rest periods (each `Exercise` may carry `restSeconds`), so a WOD like *Barbara* (5 rounds, 3 min rest) and a continuous WOD like *Cindy* use the same data shape.
-
-### Schemes (how rounds/rep-quota are expressed)
-Rather than special-casing Fran's descending 21-15-9, the app computes the **effective round structure** from the ordered `exercises` list. Each distinct working block of consecutive exercises constitutes one *round*; repeating the block N times yields N rounds. For top-time WODs the same block = one pass to finish.
-
-- **For-time:** clock fixed at `minutes` (nullable → unlimited). The app counts completed rounds as the `exercises` block cycles. Active time = elapsed − pausedTime. Stops on clock expiry or Finish.
-- **Top-time:** the `exercises` block is the target; auto-stop when the final exercise's quota is met. Pauses stop the active clock (reps are the driver).
-
-> **Round definition:** one full pass through the working `exercises` block at each `Exercise.reps` quota. `Exercise.restSeconds`, when set, defines a rest period inserted after each completed round/block.
+| category | String? | `Girl` / `Hero` / `Custom` — drives grouping and the seed library |
+| mode | `ExecutionMode` | `.forTime` or `.topTime` |
+| blocks | [RoundBlock] | ordered; for-time blocks loop until clock, top-time play once |
+| isBuiltin | Bool | benchmark presets vs. user WODs |
+| createdAt / updatedAt | Date | |
 
 **Rest between rounds** is an *optional per-workout* feature: set on each `Exercise.restSeconds` (or a `Workout.restBetweenRoundsSeconds`). Continuous WODs (Cindy, Fran, DT) leave it `nil`; spaced WODs (Barbara) set it. The field is present in v1; it only does something when populated.
 
@@ -132,7 +127,7 @@ Rather than special-casing Fran's descending 21-15-9, the app computes the **eff
 1. Home lists WODs (builtins first, grouped Girl / Hero, then custom). Tap **Cindy**.
 2. Detail shows scheme (5/10/15), mode **For-time 20:00**, movement labels, a **Start** button.
 3. Tap Start → timer screen: clock at 20:00, per-movement cycling counter at round 0.
-4. The cycling counter shows the current exercise and reps completed for it this pass; tapping advances one rep and cycles through exercises. Completing all quotas advances the round counter internally.
+4. The cycling counter shows the current exercise and reps completed for it this pass; tapping advances one rep and cycles through exercises. Completing all quotas advances the round counter internally (one play of the current `RoundBlock`).
 5. **Pause/Resume**: freezing the clock; paused seconds accumulate and are subtracted from active time. Rest-between-rounds (if any) is handled automatically when a round completes.
 6. Tap **Finish** → attempt saved (resultType = rounds, roundCount, elapsedTime, pausedTime, activeTime).
 
