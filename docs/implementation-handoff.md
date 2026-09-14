@@ -273,13 +273,14 @@ struct WODSimulator {
         return (repsDonePerExercise[ex.id] ?? 0) >= ex.effectiveReps
     }
     var canAutoStop: Bool { phase == .finished || topTimeBlockCompleted }
+    var totalRepsDone: Int { repsDonePerExercise.values.reduce(0, +) }
 
     func start() {
         repsDonePerExercise.removeAll(keepingCapacity: true); exerciseIndex = 0
         phase = .running
     }
     func advanceRep() -> TimerEvent {
-        precondition(phase == .running && restDeadline == nil, "cannot advance during rest")
+        if phase != .running || restDeadline != nil { return .none }
         guard let ex = currentExercise, let block = currentBlock else { return .none }
         repsDonePerExercise[ex.id, default: 0] += 1
         if repsDonePerExercise[ex.id] ?? 0 >= ex.effectiveReps {
@@ -349,21 +350,316 @@ struct SessionSnapshot {
 
 ## 7. Services
 
-### WorkoutTimerService (bridge simulator → clock → persistence)
-`Services/WorkoutTimerService.swift`, `ObservableObject`:
-- Holds a `WODSimulator` + a 1-second `Task` ticker that:
-  - advances the clock (computes active vs paused from a stored `pausedAt`),
-  - republishes the snapshot.
-- Methods: `start()`, `pause()`, `resume()`, `advanceRep()` (calls `sim.advanceRep()`, publishes `TimerEvent`), `startRest()`, `endRest()`, `finish()`.
-- On **finish()**: compute `activeTime = wallClock - pausedAccumulated`, `elapsedTime = wallClock`; detect PR via `ResultsService`; insert a `WorkoutRecord`; `sim.reset()`.
-- Must be **testable** with an injected `TimeProvider`/clock so no real timers are needed in unit tests.
+### Services/WorkoutTimerService.swift (full source)
+```swift
+import Foundation
+import SwiftUI
+import SwiftData
 
-### ResultsService (pure over SwiftData)
-`Services/ResultsService.swift`:
-- `recordHistory(for workout:window:) -> [WorkoutRecord]` (sorted desc by date).
-- `windowSummary(for:window:) -> Summary` (workoutsCount, prsThisWindow, bestRounds, bestTime, avgActiveTime).
-- `previousBest(for:mode:asOf:) -> Double?` (for-time → max rounds; top-time → min activeTime).
-- Uses `#Predicate<WorkoutRecord>` on `workout` + date range.
+// MARK: - Published session state the TimerView binds to
+struct SessionSnapshot: Equatable {
+    var phase: WODSimulator.Phase
+    var roundsCompleted: Int
+    var blockIndex: Int
+    var exerciseIndex: Int
+    var repsInCurrentExercise: Int
+    var currentExerciseLabel: String
+    var wallClock: TimeInterval
+    var activeElapsed: TimeInterval
+    var isPaused: Bool
+    var isFinished: Bool
+
+    var isRunning: Bool { phase == .running }
+    var shouldShowResults: Bool { phase == .finished }
+}
+
+extension SessionSnapshot {
+    static var idle: SessionSnapshot {
+        let p = WODSimulator.Phase.idle
+        return SessionSnapshot(phase: p, roundsCompleted: 0, blockIndex: 0, exerciseIndex: 0,
+                               repsInCurrentExercise: 0, currentExerciseLabel: "—",
+                               wallClock: 0, activeElapsed: 0, isPaused: false, isFinished: false)
+    }
+}
+
+@MainActor
+final class WorkoutTimerService: ObservableObject, Identifiable {
+    struct Hook { var onFinish: (WorkoutRecord) -> Void }
+
+    let id: UUID
+    let workout: Workout
+    private let simulator: WODSimulator
+    private let hook: Hook
+    private let clock: () -> Date
+
+    @Published private(set) var snapshot: SessionSnapshot
+    @Published private(set) var event: TimerEvent = .none
+    private var ticker: Task<Void, Never>?
+
+    init(id: UUID = UUID(), workout: Workout,
+         onFinish: @escaping (WorkoutRecord) -> Void,
+         clock: @escaping () -> Date = { Date() }) {
+        self.id = id
+        self.workout = workout
+        self.hook = Hook(onFinish: onFinish)
+        self.clock = clock
+        self.simulator = WODSimulator(workout: workout)
+        self.snapshot = WorkoutTimerService.makeSnapshot(from: simulator)
+    }
+
+    private static func makeSnapshot(from s: WODSimulator) -> SessionSnapshot {
+        SessionSnapshot(
+            phase: s.phase,
+            roundsCompleted: s.roundsCompleted,
+            blockIndex: s.blockIndex,
+            exerciseIndex: s.exerciseIndex,
+            repsInCurrentExercise: s.currentRepProgress ?? 0,
+            currentExerciseLabel: label(from: s),
+            wallClock: s.wallClock,
+            activeElapsed: s.wallClock - s.pausedAccumulated,
+            isPaused: s.phase == .paused,
+            isFinished: s.phase == .finished)
+    }
+
+    private static func label(from s: WODSimulator) -> String {
+        guard s.phase != .finished, let ex = s.currentExercise else {
+            return s.currentBlock?.exercises.last?.movement?.name ?? "\u{2014}"
+        }
+        let base = ex.displayLabel ?? ex.movement?.name ?? "Exercise"
+        if let eff = ex.effectiveReps, eff > 1 {
+            return "\(base) \(ex.reps ?? eff)/\(eff)"
+        }
+        return base
+    }
+
+    // MARK: Control
+    func start() {
+        guard simulator.phase != .finished else { return }
+        simulator.start()
+        event = .none
+        scheduleTicker()
+    }
+
+    func pause() {
+        guard simulator.phase == .running else { return }
+        simulator.phase = .paused
+        event = .none
+        stopTicker()
+        publish()
+    }
+
+    func resume() {
+        guard simulator.phase == .paused else { return }
+        simulator.phase = .running
+        event = .none
+        scheduleTicker()
+        publish()
+    }
+
+    func advanceRep() -> TimerEvent {
+        let ev = simulator.advanceRep()
+        event = ev
+        publish()
+        return ev
+    }
+
+    func startRest() -> TimerEvent { event = .none; publish(); return simulator.startRest() }
+    func endRest()    -> TimerEvent { event = .none; publish(); return simulator.endRest() }
+
+    // MARK: End of session — this is where a WorkoutRecord is persisted
+    func finish() {
+        if simulator.phase == .running { stopTicker() }
+        simulator.finish()
+        event = .none
+        publish()
+        let active = simulator.wallClock - simulator.pausedAccumulated
+        let total = simulator.wallClock
+        let record = WorkoutRecord(
+            workout: workout,
+            date: clock(),
+            kind: workout.mode == .forTime ? "rounds" : "time",
+            roundsCompleted: simulator.roundsCompleted,
+            totalReps: simulator.totalRepsDone,
+            elapsedTime: total,
+            pausedTime: simulator.pausedAccumulated,
+            activeTime: active,
+            isPR: ResultsService.isNewPR(workout: workout, kind: record.kind,
+                                         rounds: simulator.roundsCompleted,
+                                         activeTime: active, before: clock())
+        )
+        hook.onFinish(record)
+    }
+
+    func reset() {
+        simulator.reset()
+        event = .none
+        publish()
+    }
+
+    private func scheduleTicker() {
+        stopTicker()
+        ticker = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                let phase = self.simulator.phase
+                if phase == .paused || phase == .finished { return }
+                try? await Task.sleep(for: .seconds(1))
+                self.simulator.advanceTime(1, active: true)
+                self.publish()
+            }
+        }
+    }
+    private func stopTicker() { ticker?.cancel(); ticker = nil }
+    private func publish() { snapshot = WorkoutTimerService.makeSnapshot(from: simulator) }
+}
+```
+
+### Support/Container.swift + WODCounterApp.swift (bootstrap)
+```swift
+// Container.swift
+import Foundation
+import SwiftData
+
+enum Container {
+    static let schemas: [any PersistentModelType] = [
+        Movement.self, Exercise.self, RoundBlock.self, Workout.self, WorkoutRecord.self
+    ]
+
+    // Offline default
+    static func local() -> ModelContainer {
+        try! ModelConfiguration(for: schemas, inMemoryOnly: false).modelContainer()
+    }
+
+    // iCloud opt-in (public database, no account)
+    static func cloud() -> ModelContainer {
+        let cloud = ModelConfiguration.CloudKit(
+            configuration: .init(preferenceName: "WODCounter", publicDatabaseName: "WODCounter"))
+        return try! ModelConfiguration(identifier: "WODCounter", inMemory: false).modelContainer(cloud)
+    }
+}
+
+// WODCounterApp.swift
+import SwiftUI
+import SwiftData
+
+@main
+struct WODCounterApp: App {
+    @State private var model = AppModel()
+    @State private var serviceFactory: ServiceFactory
+
+    init() {
+        let container = Container.local()
+        serviceFactory = ServiceFactory(container)
+        SeedApplier(container: container).apply()   // idempotent seed
+    }
+
+    var body: some Scene {
+        WindowGroup {
+            NavigationStack {
+                HomeView()
+                    .environment(model)
+                    .environment(serviceFactory)
+            }
+            .navigationDestination(for: Route.detail) { w in WODDetailView(workout: w) }
+            .navigationDestination(for: Route.timer) { w in TimerView(workout: w) }
+        }
+    }
+}
+
+enum Route: Hashable {
+    case detail(Workout)
+    case timer(Workout)
+}
+
+// AppModel.swift
+import SwiftUI
+import SwiftData
+
+@Observable
+final class AppModel {
+    var pendingStart: Workout?
+    var results: ResultsService
+    init(_ context: ModelContext) { results = ResultsService(context: context) }
+
+    func startWorkout(_ w: Workout) { pendingStart = w }
+}
+
+// ServiceFactory.swift
+import SwiftUI
+import SwiftData
+
+@MainActor
+final class ServiceFactory {
+    let context: ModelContext
+    init(_ container: ModelContainer) { context = container.mainContext }
+
+    func makeTimerService(for workout: Workout) -> WorkoutTimerService {
+        WorkoutTimerService(workout: workout) { [weak self] record in
+            self?.context.insert(record)
+            do { try self?.context.save() } catch { /* non-fatal on save */ }
+        }
+    }
+}
+```
+
+### Services/ResultsService.swift (full source)
+```swift
+import Foundation
+import SwiftData
+
+struct WindowSummary {
+    var workoutsCount: Int
+    var prsThisWindow: Int
+    var bestRounds: Int
+    var bestTime: TimeInterval   // smallest activeTime (lower is better)
+    var avgActiveTime: TimeInterval
+}
+
+@MainActor
+final class ResultsService {
+    let context: ModelContext
+    init(_ context: ModelContext) { self.context = context }
+
+    func history(for workout: Workout?, window: DateInterval, kind: String? = nil) -> [WorkoutRecord] {
+        guard let workout else { return [] }
+        let predicate = #Predicate<WorkoutRecord> {
+            $0.workout?.id == workout.id &&
+            $0.date >= window.start && $0.date <= window.end &&
+            (kind == nil || $0.kind == kind)
+        }
+        let descriptor = FetchDescriptor<WorkoutRecord>(
+            predicate: predicate,
+            sortBy: [SortDescriptor(\.date, order: .reverse)])
+        return (try? context.fetch(descriptor)) ?? []
+    }
+
+    func summary(for workout: Workout?, window: DateInterval, kind: String?) -> WindowSummary {
+        let records = history(for: workout, window: window, kind: kind)
+        let prs = records.filter { $0.isPR }
+        let bestTime = records.min(by: { $0.activeTime < $1.activeTime })?.activeTime ?? .greatestFiniteMagnitude
+        let avg = records.isEmpty ? 0 : records.reduce(0) { $0 + $1.activeTime } / Double(records.count)
+        return WindowSummary(workoutsCount: records.count, prsThisWindow: prs.count,
+                             bestRounds: records.max(by: { $0.roundsCompleted < $1.roundsCompleted })?.roundsCompleted ?? 0,
+                             bestTime: bestTime, avgActiveTime: avg)
+    }
+
+    func previousBest(for workout: Workout, kind: String, asOf date: Date) -> Double? {
+        let candidates = history(for: workout, window: date.start ... date.end, kind: kind)
+            .filter { $0.date < date }
+        if kind == "rounds" {
+            return candidates.max(by: { $0.roundsCompleted < $1.roundsCompleted })?.roundsCompleted
+        } else {
+            return candidates.min(by: { $0.activeTime < $1.activeTime })?.activeTime
+        }
+    }
+
+    static func isNewPR(workout: Workout, kind: String, rounds: Int, activeTime: TimeInterval, before date: Date) -> Bool {
+        guard let best = previousBest(for: workout, kind: kind, asOf: date) else { return true }
+        return kind == "rounds" ? rounds > best : activeTime < best
+    }
+}
+```
+
 
 ---
 
@@ -386,12 +682,302 @@ struct SessionSnapshot {
 
 ## 9. Views
 
-- **HomeView** — `@Query` all `Workout`; builtins first (grouped Girl/Hero) then Custom; tap → WODDetailView.
-- **WODDetailView** — name, description, category, mode, block scheme (render each `displayLabel`), for-time minutes or "races reps"; **Start** → TimerView; History; edit/delete.
-- **TimerView** — big clock (countdown for-time / up for top-time); per-exercise cycling counter (`label`, `repsInCurrentExercise`/effectiveReps); Pause/Resume, Finish, Rest; live round indicator (for-time) or "finished" callout (top-time). On auto-stop/expiry: results overlay with **Share** (ImageRenderer screenshot).
-- **ResultsView** — window tabs (7/30/90/all); summary header ("Past 30 days: X workouts, Y PRs"); per-WOD bests with Δ vs. last; Swift Charts bar of best-over-time; attempts drill-down; share card.
-- **CreateWODView** — pick movements; set reps/weight/distance; mode; for-time minutes (top-time) or reps (top-time); optional rest between rounds; name; Save → insert `Workout` + `RoundBlock`s (custom → syncs if iCloud on).
-- **SettingsView** — **iCloud toggle** (re-create container: CloudKit when on, in-memory+persistent when off), time-window default (7/30/90/all).
+### Views/HomeView.swift
+```swift
+import SwiftUI
+
+struct HomeView: View {
+    @Query(sort: \Workout.name) private var workouts: [Workout]
+    @Environment(AppModel.self) private var model
+    @State private var route: Route?
+
+    var body: some View {
+        List {
+            Section("Girl")      { ForEach(section(.girl))     { HomeRow(workout: $0, route: $route) } }
+            Section("Hero")      { ForEach(section(.hero))     { HomeRow(workout: $0, route: $route) } }
+            Section("Custom")    { ForEach(section(.custom))   { HomeRow(workout: $0, route: $route) } }
+        }
+        .navigationTitle("WODs")
+    }
+
+    private func section(_ filter: (Workout) -> Bool) -> [Workout] { workouts.filter(filter) }
+
+    private func HomeRow(workout: Workout, route: Binding<Route?>) -> some View {
+        Button { route.wrappedValue = .detail(workout) }
+            .buttonStyle(.plain)
+            .listRowBackground(Color.clear)
+            .labelValue(workout.name)
+            .swipeActions {
+                Button(role: .destructive) { } label: { Label("Delete", systemImage: "trash") }
+            }
+            .sheet(isPresented: Binding(get: { model.pendingStart == workout },
+                                        set: { if $0 { model.pendingStart = workout } })) {
+                if model.pendingStart == workout {
+                    WODDetailView(workout: workout)
+                }
+            }
+    }
+}
+```
+
+### Views/WODDetailView.swift
+```swift
+import SwiftUI
+
+struct WODDetailView: View {
+    @Environment(AppModel.self) private var model
+    @Environment(ServiceFactory.self) private var factory
+    let workout: Workout
+
+    private var blocks: [(id: Int, index: Int, repeatTimes: Int, exercises: [Exercise])] {
+        workout.blocks.enumerated().map { (i, b) in
+            (id: i, index: i, repeatTimes: b.repeatTimes, exercises: b.exercises)
+        }
+    }
+
+    var body: some View {
+        Form {
+            Section {
+                VStack(alignment: .leading) {
+                    Text(workout.name).font(.title.bold())
+                    if let d = workout.description { Text(d).foregroundStyle(.secondary) }
+                    Label(workout.mode.title, systemImage: workout.mode.symbol)
+                    if workout.mode == .forTime, let m = workout.forTimeMinutes {
+                        Text("For time — \(Format.timer(m))")
+                    } else {
+                        Text("Top time — race to the reps")
+                    }
+                }
+            }
+            Section("Scheme") {
+                ForEach(blocks) { item in
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Round \(item.index + 1) of \(item.repeatTimes == 0 ? "many" : item.repeatTimes)")
+                            .font(.caption).foregroundStyle(.secondary)
+                        ForEach(item.exercises) { Text($0.displayLabel ?? "Exercise") }
+                    }
+                }
+            }
+            Section {
+                Button("Start") { model.startWorkout(workout); route = .timer(workout) }
+            }
+            Section {
+                Button("History") { route = .results }
+            }
+        }
+        .navigationTitle(workout.name)
+        .toolbar { if !workout.isBuiltin { ToolbarItem(placement: .destructiveAction) { Button("Delete", role: .destructive) {} } } }
+    }
+    @State private var route: Route?.init(detail: nil)
+}
+```
+
+### Views/TimerView.swift
+```swift
+import SwiftUI
+import SwiftData
+import Image
+
+struct TimerView: View {
+    @Environment(ServiceFactory.self) private var factory
+    let workout: Workout
+    @Environment(AppModel.self) private var model
+
+    @State private var service: WorkoutTimerService?
+    @State private var snapshot: SessionSnapshot = .idle
+    @State private var shareSheet: ResultsCard?
+
+    var body: some View {
+        VStack(spacing: 24) {
+            Text(workout.name).font(.title2.bold())
+            Text(Format.duration(workout.mode == .topTime ? snapshot.activeElapsed : max(0, (workout.forTimeMinutes ?? 0) * 60 - snapshot.activeElapsed)))
+                .font(.system(size: 64, weight: .bold, design: .monospaced))
+                .contentTransition(.numericText())
+            VStack { Text(snapshot.currentExerciseLabel).font(.headline)
+                      Text("\(snapshot.repsInCurrentExercise) / \(effectiveReps(snapshot))")
+                          .foregroundStyle(.secondary) }
+            HStack(spacing: 16) {
+                Button(action: { if snapshot.isRunning { service?.pause() } else { service?.resume() } }) {
+                    Label(snapshot.isPaused ? "Resume" : "Pause", systemImage: snapshot.isPaused ? "play.fill" : "pause.fill")
+                        .frame(minWidth: 110)
+                }
+                if workout.mode == .topTime {
+                    Button(action: { service?.finish() }) { Label("Finish", systemImage: "flag.fill") }.frame(minWidth: 110)
+                }
+                Button(action: { service?.startRest(); service?.endRest() }) { Label("Rest", systemImage: "hourglass") }
+            }
+        }
+        .padding()
+        .onChange(of: snapshot.isFinished) { _, finished in if finished { shareSheet = ResultsCard(snapshot: snapshot, reason: reason) } }
+        .task { if service == nil { service = factory.makeTimerService(for: workout) } }
+        .sheet(item: $shareSheet) { card in ResultsCard(snapshot: card.snapshot, reason: card.reason) }
+    }
+
+    private var reason: FinishedReason {
+        guard snapshot.shouldShowResults else { return .manual }
+        return workout.mode == .forTime ? .clockExpired : .goalReached
+    }
+    private func effectiveReps(_ s: SessionSnapshot) -> Int {
+        guard s.phase != .finished, let ex = s.currentExercise else { return 0 }
+        return ex.effectiveReps
+    }
+}
+
+enum Format {
+    static func duration(_ t: TimeInterval) -> String {
+        let h = Int(t) / 3600, m = (Int(t) % 3600) / 60, sec = Int(t) % 60
+        return String(format: "%02d:%02d:%02d", h, m, sec)
+    }
+    static func timer(_ minutes: Int) -> String { duration(Double(minutes) * 60) }
+}
+
+struct ResultsCard: Identifiable {
+    let id = UUID()
+    let snapshot: SessionSnapshot
+    let reason: FinishedReason
+    // Present via .sheet; sharing is done inside the ResultsCard view using ImageRenderer.
+}
+
+struct ResultsCard: View {
+    let snapshot: SessionSnapshot
+    let reason: FinishedReason
+    @Environment(ServiceFactory.self) private var factory
+
+    var body: some View {
+        VStack(spacing: 20) {
+            Text(reason == .goalReached ? "Done!" : "Time's up").font(.largeTitle.bold())
+            Text(formatResult()).font(.title)
+            if snapshot.roundsCompleted > 0 || workout-like { shareButton }
+            Text("Tap to dismiss")
+        }
+        .padding()
+    }
+    private func formatResult() -> String { /* build from snapshot + reason */ ""
+    }
+}
+```
+
+### Views/ResultsView.swift
+```swift
+import SwiftUI
+import Charts
+
+struct ResultsView: View {
+    @Environment(AppModel.self) private var model
+    @Environment(ServiceFactory.self) private var factory
+    @State private var window: Window = .month
+    @State private var selected: Workout?
+    @State private var share: ShareCard?
+
+    private var summary: WindowSummary { factory.results.summary(for: selected, window: interval(for: window), kind: selected?.mode == .forTime ? "rounds" : "time") }
+
+    var body: some View {
+        List {
+            Section("Summary") {
+                LabeledContent("Workouts", value: "\(summary.workoutsCount)")
+                LabeledContent("PRs", value: "\(summary.prsThisWindow)")
+                LabeledContent("Best rounds", value: "\(summary.bestRounds)")
+                LabeledContent("Best time", value: "\(Format.duration(summary.bestTime))")
+            }
+            Section("Per-WOD bests") {
+                ForEach(topWorkouts()) { w in
+                    Button { selected = w } label: { Text("\(w.name)  \(bestLine(for: w))") }
+                        .buttonStyle(.plain)
+                }
+            }
+            Section("Best over time") {
+                Chart { /* bar of recent per-7-day counts */ }
+            }
+        }
+        .navigationTitle("History")
+        .toolbar { Menu("Window") { ForEach(Window.allCases, id: \.self) { Button($0.title) { window = $0 } } }
+        .sheet(item: $share) { ShareCard(card: $0) }
+    }
+}
+
+enum Window: String, CaseIterable {
+    case week = "7d", month = "30d", quarter = "90d", all = "All"
+    var title: String { rawValue
+    func interval() -> DateInterval { start = Calendar.current.date(byAdding: .day, value: -offset(), date: .now)!; end = .now }
+    private var offset() -> Int { switch self { case .week: 7; case .month: 30; case .quarter: 90; default: .max } }
+}
+```
+
+### Views/CreateWODView.swift
+```swift
+import SwiftUI
+import SwiftData
+
+struct CreateWODView: View {
+    @Environment(AppModel.self) private var model
+    @Environment(\.modelContext) private var context
+    @Query(sort: \Movement.name) private var movements: [Movement]
+
+    @State private var name = ""
+    @State private var mode: ExecutionMode = .topTime
+    @State private var minutes = 5
+    @State private var block: [Exercise] = []
+    @State private var restAfterBlock = 0
+
+    var body: some View {
+        Form {
+            TextField("Name", text: $name)
+            Picker("Mode", selection: $mode) {
+                Text("For Time").tag(ExecutionMode.forTime)
+                Text("Top Time").tag(ExecutionMode.topTime)
+            }
+            if mode == .forTime { TextField("Minutes", value: $minutes, format: .number) }
+            Section("Movements") {
+                ForEach(movements) { m in
+                    Toggle(m.name, isOn: Binding(get: { block.contains { $0.movement?.name == m.name } },
+                                                 set: { if $0 { block.append(makeExercise(for: m)) } }))
+                }
+                ForEach(block) { e in TextField("Reps", value: Binding(get: { e.reps ?? 0 }, set: { e.reps = $0 }), format: .number) }
+            }
+            if mode == .topTime { TextField("Rest between rounds (s)", value: $restAfterBlock, format: .number) }
+            Button("Save") { save() }
+        }
+        .navigationTitle("Create WOD")
+    }
+    private func makeExercise(for m: Movement) -> Exercise {
+        Exercise(movement: m, reps: mode == .topTime ? block.first(where: { $0.movement?.name == m.name })?.reps ?? 1 : nil)
+    }
+    private func save() {
+        let workout = Workout(name: name, mode: mode, isBuiltin: false)
+        let blockModel = RoundBlock(repeatTimes: mode == .forTime ? 0 : 1, restAfterBlock: mode == .topTime ? restAfterBlock : nil)
+        blockModel.exercises = block
+        workout.blocks = [blockModel]
+        context.insert(workout)
+        try? context.save()
+    }
+}
+```
+
+### Views/SettingsView.swift
+```swift
+import SwiftUI
+
+struct SettingsView: View {
+    @AppStorage("cloudKitEnabled") private var cloudKitEnabled = false
+    @AppStorage("defaultWindow") private var defaultWindow = "30d"
+
+    var body: some View {
+        Form {
+            Section("Sync") {
+                Toggle("Sync across my devices (iCloud)", isOn: $cloudKitEnabled)
+                Text("A public iCloud database is used. No account, no server.")
+            }
+            Section("Preferences") {
+                Picker("Default results window", selection: $defaultWindow) {
+                    ForEach(Window.allCases, id: \.self) { Text($0.title) }
+                }
+            }
+        }
+        .navigationTitle("Settings")
+    }
+}
+```
+
 
 ---
 
