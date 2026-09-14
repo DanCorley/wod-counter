@@ -273,6 +273,7 @@ struct WODSimulator {
         return (repsDonePerExercise[ex.id] ?? 0) >= ex.effectiveReps
     }
     var canAutoStop: Bool { phase == .finished || topTimeBlockCompleted }
+
     var totalRepsDone: Int { repsDonePerExercise.values.reduce(0, +) }
 
     func start() {
@@ -296,17 +297,29 @@ struct WODSimulator {
     private func completeBlock() -> TimerEvent {
         guard let block = currentBlock else { return .none }
         roundsCompleted += 1
-        if blockIndex + 1 >= workout.blocks.count {
-            phase = .finished; return .finished(.goalReached)
+        // Finite-target WODs: stop at the target round count.
+        if let target = playTarget {
+            if roundsCompleted >= target { phase = .finished; return .finished(.goalReached) }
+        } else {
+            // For-time AMRAP (block repeat == 0): loop the block until the clock expires.
+            if isClockExpired { phase = .finished; return .finished(.clockExpired) }
+            blockIndex = 0; repsDonePerExercise.removeAll(keepingCapacity: true); exerciseIndex = 0
+            return .blockCompleted
         }
-        if isClockExpired {
-            phase = .finished; return .finished(.clockExpired)
-        }
-        if blockIndex + 1 < workout.blocks.count, let next = workout.blocks[blockIndex + 1], let rest = next.restAfterBlock {
-            restDeadline = wallClock + rest; phase = .resting; return .blockCompleted
-        }
+        // Otherwise advance to the next block.
         blockIndex += 1; repsDonePerExercise.removeAll(keepingCapacity: true); exerciseIndex = 0
         return .blockCompleted
+    }
+
+    // Total rounds a WOD plays before its goal is reached. nil = for-time AMRAP (loop until clock).
+    var playTarget: Int? {
+        switch workout.mode {
+        case .topTime:
+            return blocks.reduce(0) { $0 + ($1.repeatTimes > 0 ? $1.repeatTimes : 1) }
+        case .forTime:
+            if blocks.allSatisfy { $0.repeatTimes == 0 } { return nil } // loop until clock
+            return blocks.first { $0.repeatTimes > 0 }?.repeatTimes ?? blocks.first?.repeatTimes
+        }
     }
     func startRest() -> TimerEvent {
         guard phase == .running else { return .none }
@@ -327,11 +340,12 @@ struct WODSimulator {
         repsDonePerExercise.removeAll(); wallClock = 0; pausedAccumulated = 0; isPaused = false; restDeadline = nil
     }
 }
-```
 
-### SessionSnapshot (value type the service publishes)
-```swift
-struct SessionSnapshot {
+> Note: `SessionSnapshot` (the value type `WorkoutTimerService` republishes) is fully defined in §7. The `tick(now:start:)` method shown here has been removed — the service drives time with an internal `Task` loop, so this method was not part of the final design.
+
+---
+
+## 7. Services
     var phase: WODSimulator.Phase
     var roundsCompleted: Int
     var blockIndex: Int
@@ -544,7 +558,7 @@ import SwiftData
 
 @main
 struct WODCounterApp: App {
-    @State private var model = AppModel()
+    @State private var model = AppModel(serviceFactory)
     @State private var serviceFactory: ServiceFactory
 
     init() {
@@ -579,7 +593,7 @@ import SwiftData
 final class AppModel {
     var pendingStart: Workout?
     var results: ResultsService
-    init(_ context: ModelContext) { results = ResultsService(context: context) }
+    init(_ factory: ServiceFactory) { results = ResultsService(context: factory.context) }
 
     func startWorkout(_ w: Workout) { pendingStart = w }
 }
@@ -785,7 +799,7 @@ struct TimerView: View {
 
     @State private var service: WorkoutTimerService?
     @State private var snapshot: SessionSnapshot = .idle
-    @State private var shareSheet: ResultsCard?
+    @State private var shareSheet: ResultsCardData?
 
     var body: some View {
         VStack(spacing: 24) {
@@ -808,9 +822,9 @@ struct TimerView: View {
             }
         }
         .padding()
-        .onChange(of: snapshot.isFinished) { _, finished in if finished { shareSheet = ResultsCard(snapshot: snapshot, reason: reason) } }
+        .onChange(of: snapshot.isFinished) { _, finished in if finished { shareSheet = ResultsCardData(workoutName: workout.name, snapshot: snapshot, reason: reason) } }
         .task { if service == nil { service = factory.makeTimerService(for: workout) } }
-        .sheet(item: $shareSheet) { card in ResultsCard(snapshot: card.snapshot, reason: card.reason) }
+        .sheet(item: $shareSheet) { card in ResultsCardView(data: card) }
     }
 
     private var reason: FinishedReason {
@@ -831,28 +845,44 @@ enum Format {
     static func timer(_ minutes: Int) -> String { duration(Double(minutes) * 60) }
 }
 
-struct ResultsCard: Identifiable {
+// The results sheet payload (holds the data).
+struct ResultsCardData: Identifiable {
     let id = UUID()
+    let workoutName: String
     let snapshot: SessionSnapshot
     let reason: FinishedReason
-    // Present via .sheet; sharing is done inside the ResultsCard view using ImageRenderer.
+    var roundsCompleted: Int { snapshot.roundsCompleted }
 }
 
-struct ResultsCard: View {
-    let snapshot: SessionSnapshot
-    let reason: FinishedReason
-    @Environment(ServiceFactory.self) private var factory
+// Renders the results sheet and offers a Share action.
+struct ResultsCardView: View {
+    let data: ResultsCardData
 
     var body: some View {
         VStack(spacing: 20) {
-            Text(reason == .goalReached ? "Done!" : "Time's up").font(.largeTitle.bold())
-            Text(formatResult()).font(.title)
-            if snapshot.roundsCompleted > 0 || workout-like { shareButton }
+            Text(data.reason == .goalReached ? "Done!" : "Time's up").font(.largeTitle.bold())
+            Text(resultLine(data))
+                .font(.title)
+                .contentTransition(.numericText())
+            Text(data.workoutName).foregroundStyle(.secondary)
+            ShareLink(item: shareText(for: data)) {
+                Label("Share", systemImage: "square.and.arrow.up")
+            }
             Text("Tap to dismiss")
         }
         .padding()
     }
-    private func formatResult() -> String { /* build from snapshot + reason */ ""
+
+    private func resultLine(_ d: ResultsCardData) -> String {
+        switch d.reason {
+        case .clockExpired:
+            return "\(d.roundsCompleted) rounds"
+        case .goalReached, .manual:
+            return "\(Format.duration(d.snapshot.activeElapsed)) · \(d.roundsCompleted) reps"
+        }
+    }
+    private func shareText(for d: ResultsCardData) -> String {
+        "I just completed \(d.workoutName): \(resultLine(d))"
     }
 }
 ```
