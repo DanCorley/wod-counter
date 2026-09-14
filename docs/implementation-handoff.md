@@ -346,23 +346,6 @@ struct WODSimulator {
 ---
 
 ## 7. Services
-    var phase: WODSimulator.Phase
-    var roundsCompleted: Int
-    var blockIndex: Int
-    var exerciseIndex: Int
-    var repsInCurrentExercise: Int
-    var currentExerciseLabel: String
-    var wallClock: TimeInterval
-    var activeElapsed: TimeInterval
-    var isPaused: Bool
-    var isFinished: Bool
-    func tick(now: Date, start: Date?) -> SessionSnapshot  // advances 1s from last tick (or start)
-}
-```
-
----
-
-## 7. Services
 
 ### Services/WorkoutTimerService.swift (full source)
 ```swift
