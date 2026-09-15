@@ -1,0 +1,16 @@
+# SwiftPM
+.build/
+.swiftpm/
+Package.resolved
+
+# Xcode / XcodeGen artifacts
+DerivedData/
+*.xcodeproj/
+*.xcworkspace/
+build/
+
+# macOS
+.DS_Store
+
+# Local test venv
+/xcodetestenv/
