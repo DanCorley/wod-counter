@@ -156,6 +156,7 @@ enum ExecutionMode: String, Codable, CaseIterable, Sendable {
 ```swift
 @Model final class Exercise {
     @Relationship var movement: Movement?
+    var roundBlock: RoundBlock?        // inverse of RoundBlock.exercises
     var reps: Int?               // nil = distanced-only (effective quota 1)
     var weight: String?          // e.g. "95 lb", "225 lb", "53/35 lb"
     var distance: String?        // e.g. "1 mi", "400 m"
@@ -172,7 +173,8 @@ enum ExecutionMode: String, Codable, CaseIterable, Sendable {
 ### RoundBlock
 ```swift
 @Model final class RoundBlock {
-    @Relationship(deleteRule: .cascade, inverse: \Workout.blocks) var exercises: [Exercise]
+    @Relationship(deleteRule: .cascade, inverse: \Exercise.roundBlock) var exercises: [Exercise]
+    var workout: Workout?               // inverse of Workout.blocks
     var repeatTimes: Int                 // 0 = loop until clock (for-time); N = play N (top-time); 1 = single pass
     var restAfterBlock: Int?             // seconds to rest after this block; nil = continuous
     init(repeatTimes: Int, restAfterBlock: Int? = nil) {...}
@@ -183,16 +185,16 @@ enum ExecutionMode: String, Codable, CaseIterable, Sendable {
 ```swift
 @Model final class Workout {
     var name: String
-    var description: String?
+    var workoutDescription: String?    // renamed from "description" — Swift reserves that name
     var category: String?              // "Girl" | "Hero" | "Custom"
     var mode: ExecutionMode
     @Relationship(deleteRule: .cascade, inverse: \WorkoutRecord.workout) var records: [WorkoutRecord]
-    @Relationship(deleteRule: .cascade, inverse: \Workout.blocks) var blocks: [RoundBlock]
+    @Relationship(deleteRule: .cascade, inverse: \RoundBlock.workout) var blocks: [RoundBlock]
     var isBuiltin: Bool
     var forTimeMinutes: Int?           // nil = unlimited (Murph); e.g. 20 (Cindy)
     var createdAt: Date
     var updatedAt: Date
-    init(name:, mode:, isBuiltin:, forTimeMinutes: = nil, createdAt: = Date(), updatedAt: = Date()) {...}
+    init(name:, workoutDescription:, mode:, isBuiltin:, forTimeMinutes: = nil, createdAt: = Date(), updatedAt: = Date()) {...}
 }
 ```
 
