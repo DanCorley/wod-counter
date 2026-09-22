@@ -7,15 +7,15 @@ struct HomeView: View {
     @State private var isShowingSettings = false
 
     private var girlWorkouts: [Workout] {
-        workouts.filter { $0.category == "Girl" }
+        workouts.filter { $0.isGirlBenchmark }
     }
 
     private var heroWorkouts: [Workout] {
-        workouts.filter { $0.category == "Hero" }
+        workouts.filter { $0.isHeroBenchmark }
     }
 
     private var customWorkouts: [Workout] {
-        workouts.filter { $0.category == "Custom" || (!$0.isBuiltin && $0.category != "Girl" && $0.category != "Hero") }
+        workouts.filter { $0.isCustom }
     }
 
     var body: some View {
@@ -76,14 +76,12 @@ struct WorkoutRow: View {
 
     var body: some View {
         NavigationLink(destination: WODDetailView(workout: workout)) {
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 6) {
                 HStack {
                     Text(workout.name)
                         .font(.headline)
                     Spacer()
-                    Label(workout.mode.title, systemImage: workout.mode.symbol)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    WorkoutModeBadge(mode: workout.mode)
                 }
 
                 if let desc = workout.workoutDescription {
@@ -92,8 +90,10 @@ struct WorkoutRow: View {
                         .foregroundStyle(.secondary)
                         .lineLimit(2)
                 }
+
+                WorkoutSchemeView(workout: workout, isCompact: true)
             }
-            .padding(.vertical, 2)
+            .padding(.vertical, 4)
         }
     }
 }

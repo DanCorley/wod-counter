@@ -8,9 +8,7 @@ struct WODCounterApp: App {
     @State private var appModel: AppModel
 
     init() {
-        let schema = Schema([Movement.self, Exercise.self, RoundBlock.self, Workout.self, WorkoutRecord.self])
-        let config = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
-        let container = try! ModelContainer(for: schema, configurations: config)
+        let container = Container.local()
         self.container = container
         let factory = ServiceFactory(container)
         self.serviceFactory = factory

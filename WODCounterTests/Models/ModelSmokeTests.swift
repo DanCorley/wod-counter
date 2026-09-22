@@ -5,11 +5,7 @@ import SwiftData
 @MainActor
 final class ModelSmokeTests: XCTestCase {
     private func makeContainer() throws -> ModelContainer {
-        let config = ModelConfiguration(isStoredInMemoryOnly: true)
-        return try ModelContainer(
-            for: Movement.self, Exercise.self, RoundBlock.self, Workout.self, WorkoutRecord.self,
-            configurations: config
-        )
+        Container.inMemory()
     }
 
     func testEffectiveRepsReturnsRepsOrDefaultsToOne() throws {

@@ -27,4 +27,39 @@ import SwiftData
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }
+
+    // MARK: - Category Helpers
+    var isGirlBenchmark: Bool {
+        category == "Girl"
+    }
+
+    var isHeroBenchmark: Bool {
+        category == "Hero"
+    }
+
+    var isCustom: Bool {
+        category == "Custom" || (!isBuiltin && category != "Girl" && category != "Hero")
+    }
+
+    // MARK: - Scheme Display Helpers
+    var modeSubtitle: String {
+        if mode == .forTime, let minutes = forTimeMinutes {
+            return "For Time (AMRAP) — \(Format.timer(minutes))"
+        } else {
+            return "Top Time — Race to complete all reps"
+        }
+    }
+
+    func blockHeader(for block: RoundBlock, index: Int) -> String {
+        let total = blocks.count
+        if total > 1 {
+            return "Block \(index + 1) of \(total)"
+        } else if block.repeatTimes > 1 {
+            return "Repeat \(block.repeatTimes) Rounds"
+        } else if mode == .forTime && block.repeatTimes == 0 {
+            return "Continuous Rounds (AMRAP)"
+        } else {
+            return "Round 1"
+        }
+    }
 }

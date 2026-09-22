@@ -10,9 +10,7 @@ final class WODSimulatorTests: XCTestCase {
     @MainActor
     override func setUp() {
         super.setUp()
-        let schema = Schema([Movement.self, Exercise.self, RoundBlock.self, Workout.self, WorkoutRecord.self])
-        let config = ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)
-        container = try! ModelContainer(for: schema, configurations: config)
+        container = Container.inMemory()
         context = container.mainContext
     }
 
