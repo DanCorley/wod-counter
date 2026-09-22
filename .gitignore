@@ -14,3 +14,8 @@ build/
 
 # Local test venv
 /xcodetestenv/
+
+# Session exports
+*.html
+session-*.md
+

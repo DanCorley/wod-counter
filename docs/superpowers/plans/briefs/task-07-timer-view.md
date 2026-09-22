@@ -1,15 +1,15 @@
 # Task 7 — View: Timer
 
-**Deliverable:** The live timer screen — big clock, per-exercise cycling counter, Pause/Resume, Finish (top-time), and a results/share overlay on completion.
+**Deliverable:** The live timer screen — big clock, per-exercise cycling counter, Pause/Resume, Finish (top-time), and a results overlay on completion.
 
 ## Pointers
 - **Spec (requirements):** `docs/superpowers/specs/2026-09-11-wod-counter-design.md` § 4 (timer flow), § 5 (TimerView).
-- **Handoff (mechanics):** `docs/implementation-handoff.md` § 9 (full `TimerView.swift` reference — now using `ResultsCardData`/`ResultsCardView`; `Format.duration`/`Format.timer` helpers), `SessionSnapshot` fields, § 12 (constraints).
+- **Handoff (mechanics):** `docs/implementation-handoff.md` § 9 (`TimerView.swift` reference), `SessionSnapshot` fields, § 12 (constraints).
 - **Plan (this task):** `docs/superpowers/plans/2026-09-11-wod-counter-implementation.md` → Task 7.
 - **Siblings (consume exactly):**
-  - `WorkoutTimerService` (Task 4) — `@Environment(ServiceFactory.self)` → `makeTimerService(for:)`.
-  - `SessionSnapshot` value type: `phase`, `roundsCompleted`, `blockIndex`, `exerciseIndex`, `repsInCurrentExercise`, `currentExerciseLabel`, `wallClock`, `activeElapsed`, `isPaused`, `isFinished`.
-  - `ResultsCardData` + `ResultsCardView` for the results sheet. `Format.duration`/`Format.timer` for clock formatting.
+  - `WorkoutTimerService` (Task 5) — `@Environment(ServiceFactory.self)` → `makeTimerService(for:)`.
+  - `SessionSnapshot` (Task 3/5): `phase`, `roundsCompleted`, `blockIndex`, `exerciseIndex`, `repsInCurrentExercise`, `currentExerciseLabel`, `wallClock`, `activeElapsed`, `isPaused`, `isFinished`.
+  - `Format.duration` / `Format.timer` (Task 4) for clock formatting.
 
 ## Global constraints (verbatim)
 - iOS, Apple-native, **iOS 17.0**. SwiftUI only. **TDD:** end green, commit once, no placeholders.
@@ -20,13 +20,12 @@
 
 ## Contract
 - Holds the service lazily (`@State var service = factory.makeTimerService(for: workout)`).
-- Publishes `snapshot: SessionSnapshot`; big clock (`Format.duration`), cycling counter (`currentExerciseLabel` + `repsInCurrentExercise`/effectiveReps), controls (Pause/Resume, Finish for top-time, Rest), and a results sheet that appears on `isFinished` via `ResultsCardView`.
-- `Reason`: for-time → `clockExpired`; top-time/manual → `goalReached`/`manual`.
+- Publishes `snapshot: SessionSnapshot`; big clock (`Format.duration`), cycling counter (`currentExerciseLabel` + `repsInCurrentExercise`/effectiveReps), controls (Pause/Resume, Finish for top-time, Rest), and an auto-completion overlay that appears when `isFinished`.
 
 ## Steps
-- [ ] **Step 1:** Write `TimerView` from the handoff §9 reference, using the corrected types (`ResultsCardData`/`ResultsCardView`, not the old `ResultsCard`). Keep `Format.duration`/`Format.timer` helpers.
-- [ ] **Step 2:** Wire start/pause/resume/finish/rest to the service; show results overlay via `.sheet(item:)` on `isFinished`; call `service.finish()` to persist.
-- [ ] **Step 3:** For testable progress, assert (via a lightweight test or a preview) that pausing freezes the displayed time and resuming resumes; that the counter reflects `session.snapshot`. Confirm the full Cindy for-time and Murph top-time paths drive correctly in the simulator path. Commit.
+- [ ] **Step 1:** Write `TimerView` using `Format.duration` and `Format.timer` helpers.
+- [ ] **Step 2:** Wire start/pause/resume/finish/rest to the service; trigger `service.finish()` on completion.
+- [ ] **Step 3:** Smoke-test Cindy for-time and Murph top-time flows in the simulator to verify time formatting and rep advancing. Commit.
 
 ## Acceptance
-- For-time shows countdown + live round count; top-time shows active time + Finish + auto-stop. Pause freezes the clock; results share card appears on completion. `displayLabel`s render verbatim. One commit.
+- For-time shows countdown + live round count; top-time shows active time + Finish + auto-stop. Pause freezes the clock; results overlay triggers on completion. `displayLabel`s render verbatim. One commit.
