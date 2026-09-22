@@ -2,47 +2,35 @@ import SwiftUI
 import SwiftData
 
 struct RootView: View {
+    @Environment(AppModel.self) private var appModel: AppModel?
+
     var body: some View {
         TabView {
             NavigationStack {
-                WODListView()
+                HomeView()
             }
             .tabItem {
-                Label("WODs", systemImage: "dumbbell")
+                Label("WODs", systemImage: "dumbbell.fill")
             }
 
             NavigationStack {
-                Text("History coming in Task 5")
+                VStack(spacing: 12) {
+                    Image(systemName: "chart.bar.xaxis")
+                        .font(.system(size: 48))
+                        .foregroundStyle(.secondary)
+                    Text("History & Stats")
+                        .font(.title2.bold())
+                    Text("Complete workout sessions to view trends and personal records.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 32)
+                }
+                .navigationTitle("History")
             }
             .tabItem {
-                Label("History", systemImage: "chart.bar")
+                Label("History", systemImage: "chart.bar.xaxis")
             }
         }
-        .navigationTitle("WOD Counter")
-    }
-}
-
-struct WODListView: View {
-    @Query(sort: \Workout.name) private var workouts: [Workout]
-
-    var body: some View {
-        List {
-            ForEach(workouts) { workout in
-                VStack(alignment: .leading) {
-                    Text(workout.name).font(.headline)
-                    if let desc = workout.workoutDescription {
-                        Text(desc).font(.caption).foregroundStyle(.secondary)
-                    }
-                    HStack {
-                        Label(workout.mode.title, systemImage: workout.mode.symbol)
-                            .font(.caption)
-                        if let cat = workout.category {
-                            Text(cat).font(.caption).foregroundStyle(.secondary)
-                        }
-                    }
-                }
-            }
-        }
-        .navigationTitle("WODs")
     }
 }
