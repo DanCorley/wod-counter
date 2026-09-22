@@ -76,5 +76,9 @@ struct WODDetailView: View {
         }
         .navigationTitle(workout.name)
         .navigationBarTitleDisplayMode(.inline)
+        .fullScreenCover(isPresented: $isStartingWorkout) {
+            TimerView(workout: workout)
+        }
     }
 }
+
