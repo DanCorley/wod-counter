@@ -5,6 +5,14 @@
 > this Handoff resolves the mechanics, file tree, tooling, and conventions.
 >
 > **Status:** Ready to build. All decisions below are ratified.
+>
+> **Design evolution (2026-09, timer rework, commit `5e2a197`):** the session engine was
+> reworked from a *sequential per-rep cycling counter* to a **free-form task tracker**
+> (every set is a task; any-order rep logging; per-round sets for repeats; AMRAP rounds
+> regenerate; auto-stop on depletion or clock cap). `WorkoutTimerService` switched from
+> `ObservableObject` to `@Observable` to fix live ticking/Pause. The docs below describe the
+> *current* design; the per-task plan/briefs (`docs/superpowers/plans/`) record the earlier
+> sequential plan and are historical.
 
 ---
 
@@ -16,7 +24,9 @@ Build an Apple-native iOS app (SwiftUI + SwiftData) that runs predefined **Girl/
 - **For-time:** fixed active clock (e.g. Cindy = 20 min); count how many **rounds** you complete.
 - **Top-time:** fixed rep target; the timer **auto-stops the instant** the final rep is hit.
 
-A **per-rep cycling counter** drives both. Local SwiftData storage + **opt-in iCloud sync**.
+A **free-form task tracker** drives both: every exercise set (exercise × round) is a
+*task* with a remaining-rep count, and the athlete logs reps against **any task in any
+order** using quick counters. Local SwiftData storage + **opt-in iCloud sync**.
 A results/history view shows windowed stats, per-WOD PRs, progress, and a share card.
 
 Two requirements for the app to meet to be "done":
@@ -44,22 +54,27 @@ Two requirements for the app to meet to be "done":
 - Murph is seeded **bodyweight-only** (100/200/300). Run-based Murph is supported but deferred.
 
 ### 2.2 Modes
-- **For-time:** clock counts down from `minutes`. Active time = elapsed − pausedTime.
-  Count completed rounds; **never auto-stops** — ends on clock expiry or Finish.
-  Default Cindy `minutes = 20`.
-- **Top-time:** target = the rep quotas. Clock counts up. **Auto-stops at the final rep.**
-  Default Murph = bodyweight 100/200/300, single pass (1 "round").
+- **For-time:** the clock **counts up** and the label shows the time cap (e.g. Cindy = 20:00).
+  Active time = elapsed − pausedTime. Count completed rounds; **auto-stops when the cap
+  expires** (or on Finish). Default Cindy `minutes = 20`. AMRAP blocks (repeat `0`) regenerate
+  a fresh wave each round; the session ends at the cap.
+- **Top-time:** target = the rep quotas. Clock counts up. **Auto-stops when every task is
+  depleted.** Default Murph = bodyweight 100/200/300, single pass (1 "round").
 
-### 2.3 Counting (the cycling rep counter)
-The timer shows the **current exercise** and **reps completed for it this pass**. Tapping
-**once** = one rep → counter ticks (+1). When an exercise reaches its quota, the counter
-**cycles to the next exercise**. Completing every exercise in a block = **one round**
-(tracked internally, no separate "round +1" button). This single mechanism serves both modes.
+### 2.3 Counting (the free-form task tracker)
+At session start the workout is expanded into a flat list of **tasks** — one per exercise
+set per round ("21 Thrusters (95 lb) — 21 left"). The timer screen shows the whole list with
+remaining rep counts. Tap a set to select it, then log reps with the **+1/+5/+10/+25** quick
+counters; reps may be logged against **any task, in any order**. No manual "complete set"
+button exists:
 
-- A **round** = one full play of a `RoundBlock`.
-- **Descending schemes** (Fran 21-15-9, Diane): each descending pass is a round → rounds = 3.
-- **Repeating schemes** (Helen ×3, DT ×5): the block repeats N times → rounds = N.
-- **Rest between rounds** (Barbara-style): an optional per-workout rest; continuous WODs leave it off.
+- Depleting **every** task in a finite block = **one round** (tracked internally).
+- **Repeated blocks** (Helen ×3, DT ×5) are pre-expanded into **per-round sets** — DT renders
+  5 × 3 = 15 tasks, not a cycling counter.
+- **AMRAP blocks** (Cindy, repeat `0`) regenerate a fresh wave whenever all their tasks are
+  depleted — one regen = one round; the clock keeps counting to the cap.
+- **Top-time** ends the session the instant the last task reaches zero total.
+- **Rest between rounds** (Barbara-style): an optional per-block rest; continuous WODs leave it off.
 
 ### 2.4 Pause
 - **Pause/Resume** freezes the clock. Paused time is tracked and **subtracted from active time**.
@@ -106,6 +121,12 @@ without a device.
 - Cindy: 1 block {5/10/15 bodyweight}, for-time repeat=0 until 20 min.
 - DT: 1 block {12 deadlifts, 9 cleans, 6 push jerks}, repeat=5.
 - Helen: 1 block {400m run, 21 KB swings, 12 pull-ups}, repeat=3.
+
+The simulator **pre-expands** this structure at session start into per-round tasks
+(`repeatTimes` > 0 → one fresh `Task` per exercise per play; `repeatTimes` == 0 → one looping
+round whose tasks regenerate on completion). Reps are logged against a `Task` by ID, so the
+model is a list of remaining sets, not an index pointer. A "round" is a full depletion of
+one `Round`'s tasks — recorded once, or triggering a regeneration for loops.
 
 **Distanced-only exercises** (runs, row, bike, rope) have **no `reps`** → treat as an effective
 rep quota of **1** so the engine stays uniform; `displayLabel` carries the distance.
@@ -238,112 +259,150 @@ enum TimerEvent {
 
 File `Models/Sim/WODSimulator.swift` — a stateful struct (NOT a class, NOT SwiftData):
 ```swift
-struct WODSimulator {
-    let workout: Workout
-    enum Phase: Equatable { case idle, running, paused, resting, finished }
+/// Free-form workout engine: the session is modeled as a list of pending
+/// "tasks" (each exercise set in the workout). The athlete may complete reps
+/// against any task in any order; the workout ends when every finite task is
+/// depleted (top-time), or when the For-Time clock cap expires (AMRAP rounds
+/// regenerate forever).
+struct WODSimulator: Sendable {
+    enum Phase: String, Sendable, Equatable {
+        case idle, running, paused, resting, finished
+    }
 
-    // progress state
+    /// A single pending set of reps (one exercise at one round).
+    struct Task: Identifiable, Sendable, Equatable {
+        let id: UUID
+        let blockIndex: Int
+        let movementName: String
+        let displayLabel: String
+        let quota: Int                 // exercise.effectiveReps (distance = 1)
+        private(set) var completed: Int = 0
+
+        var remaining: Int { max(0, quota - completed) }
+        var isComplete: Bool { remaining == 0 }
+
+        mutating func addReps(_ count: Int) { completed = min(quota, completed + max(0, count)) }
+    }
+
+    /// One round's worth of tasks. Finite rounds complete once; looping rounds
+    /// (AMRAP, repeatTimes == 0) regenerate a fresh wave whenever completed.
+    struct Round: Identifiable, Sendable, Equatable {
+        let id: UUID
+        let number: Int
+        let blockIndex: Int
+        let isLooping: Bool
+        var tasks: [Task]
+        var completionRecorded: Bool = false
+
+        var isComplete: Bool { !tasks.isEmpty && tasks.allSatisfy(\.isComplete) }
+
+        mutating func regenerateTasks(with workout: Workout) {
+            tasks = WODSimulator.freshTasks(for: workout.blocks[blockIndex], blockIndex: blockIndex)
+        }
+    }
+
+    let workout: Workout
+
+    // MARK: - Progress State
+    private var rounds: [Round]
     private(set) var phase: Phase = .idle
     private(set) var roundsCompleted: Int = 0
-    private(set) var blockIndex: Int = 0
-    private(set) var exerciseIndex: Int = 0
-    private(set) var repsDonePerExercise: [UUID: Int] = [:]
+    private(set) var totalRepsCompleted: Int = 0
     private(set) var wallClock: TimeInterval = 0
     private(set) var pausedAccumulated: TimeInterval = 0
-    private(set) var isPaused: Bool = false
     private(set) var restDeadline: TimeInterval? = nil
 
-    private var forTimeMinutes: Int? { workout.mode == .forTime ? workout.forTimeMinutes : nil }
+    init(workout: Workout) {
+        self.workout = workout
+        self.rounds = Self.buildRounds(for: workout)   // pre-expands repeats into per-round tasks
+    }
 
-    var currentBlock: RoundBlock? { workout.blocks[blockIndex] }
-    var currentExercise: Exercise? { currentBlock?.exercises[exerciseIndex] }
-
-    // derived
-    var currentRepProgress: Int? { currentExercise?.id.map { repsDonePerExercise[$0] ?? 0 } }
-    var resultRounds: Int { roundsCompleted }
-    var resultActiveTime: TimeInterval { wallClock - pausedAccumulated }
+    // MARK: - Derived Properties
+    var liveTasks: [Task] { rounds.flatMap(\.tasks) }
+    var totalRemaining: Int { liveTasks.reduce(0) { $0 + $1.remaining } }
+    var totalRounds: Int { rounds.count }
+    var hasLoopingRounds: Bool { rounds.contains(where: \.isLooping) }
+    /// True when every finite task is depleted AND no AMRAP round remains open.
+    var isWorkoutComplete: Bool { rounds.allSatisfy(\.isComplete) && !hasLoopingRounds }
+    var resultActiveTime: TimeInterval { max(0, wallClock - pausedAccumulated) }
+    var forTimeMinutes: Int? { workout.mode == .forTime ? workout.forTimeMinutes : nil }
     var isClockExpired: Bool {
-        guard let m = forTimeMinutes else { return false }
-        return (wallClock - pausedAccumulated) >= Double(m) * 60
+        guard let minutes = forTimeMinutes else { return false }
+        return resultActiveTime >= Double(minutes) * 60
     }
-    // top-time: finished when last exercise of last block reaches quota
-    var topTimeBlockCompleted: Bool {
-        guard workout.mode == .topTime, let block = currentBlock else { return false }
-        let last = block.exercises.count - 1
-        guard exerciseIndex == last else { return false }
-        let ex = block.exercises[last]
-        return (repsDonePerExercise[ex.id] ?? 0) >= ex.effectiveReps
-    }
-    var canAutoStop: Bool { phase == .finished || topTimeBlockCompleted }
+    var canAutoStop: Bool { phase == .finished }
+    var snapshot: SessionSnapshot { /* defined in §7 */ }
 
-    var totalRepsDone: Int { repsDonePerExercise.values.reduce(0, +) }
-
-    func start() {
-        repsDonePerExercise.removeAll(keepingCapacity: true); exerciseIndex = 0
-        phase = .running
+    // MARK: - Round Building
+    private static func buildRounds(for workout: Workout) -> [Round] {
+        // repeatTimes == 0  → one isLooping round (regenerates forever)
+        // repeatTimes == N  → N finite rounds, tasks duplicated per round (per-round sets)
+        // returns rounds in block order, numbered sequentially
     }
-    func advanceRep() -> TimerEvent {
-        if phase != .running || restDeadline != nil { return .none }
-        guard let ex = currentExercise, let block = currentBlock else { return .none }
-        repsDonePerExercise[ex.id, default: 0] += 1
-        if repsDonePerExercise[ex.id] ?? 0 >= ex.effectiveReps {
-            if exerciseIndex < block.exercises.count - 1 {
-                exerciseIndex += 1
-                return .none
-            } else {
-                return completeBlock()
-            }
-        }
-        return .none
-    }
-    private func completeBlock() -> TimerEvent {
-        guard let block = currentBlock else { return .none }
-        roundsCompleted += 1
-        // Finite-target WODs: stop at the target round count.
-        if let target = playTarget {
-            if roundsCompleted >= target { phase = .finished; return .finished(.goalReached) }
-        } else {
-            // For-time AMRAP (block repeat == 0): loop the block until the clock expires.
-            if isClockExpired { phase = .finished; return .finished(.clockExpired) }
-            blockIndex = 0; repsDonePerExercise.removeAll(keepingCapacity: true); exerciseIndex = 0
-            return .blockCompleted
-        }
-        // Otherwise advance to the next block.
-        blockIndex += 1; repsDonePerExercise.removeAll(keepingCapacity: true); exerciseIndex = 0
-        return .blockCompleted
-    }
-
-    // Total rounds a WOD plays before its goal is reached. nil = for-time AMRAP (loop until clock).
-    var playTarget: Int? {
-        switch workout.mode {
-        case .topTime:
-            return blocks.reduce(0) { $0 + ($1.repeatTimes > 0 ? $1.repeatTimes : 1) }
-        case .forTime:
-            if blocks.allSatisfy { $0.repeatTimes == 0 } { return nil } // loop until clock
-            return blocks.first { $0.repeatTimes > 0 }?.repeatTimes ?? blocks.first?.repeatTimes
+    fileprivate static func freshTasks(for block: RoundBlock, blockIndex: Int) -> [Task] {
+        block.exercises.map { exercise in
+            Task(id: UUID(), blockIndex: blockIndex,
+                 movementName: exercise.movement?.name ?? "Exercise",
+                 displayLabel: exercise.displayLabel ?? exercise.movement?.name ?? "Exercise",
+                 quota: exercise.effectiveReps)
         }
     }
-    func startRest() -> TimerEvent {
-        guard phase == .running else { return .none }
-        guard let next = workout.blocks[blockIndex + 1], next.restAfterBlock != nil else { return .none }
-        restDeadline = wallClock + (next.restAfterBlock ?? 0); phase = .resting; return .none
+
+    // MARK: - Actions
+    func start()   { if phase != .finished { phase = .running } }
+    func pause()   { if phase == .running || phase == .resting { phase = .paused } }
+    func resume()  { if phase == .paused { phase = (restDeadline != nil) ? .resting : .running } }
+
+    /// Logs completed reps against a specific pending task (any exercise, any
+    /// round). Reps are capped at the task's remaining quota.
+    @discardableResult
+    mutating func completeReps(taskID: UUID, count: Int) -> TimerEvent {
+        guard phase == .running, restDeadline == nil else { return .none }
+        guard let (roundIndex, taskIndex) = locate(taskID) else { return .none }
+        let added = min(max(0, count), rounds[roundIndex].tasks[taskIndex].remaining)
+        guard added > 0 else { return .none }
+        rounds[roundIndex].tasks[taskIndex].addReps(added)
+        totalRepsCompleted += added
+        return reconcileAfterWork()                   // may finish round / regen / stop workout
     }
-    func endRest() -> TimerEvent {
-        if phase == .resting { phase = .running }; return .none
+
+    mutating func startRest(duration: TimeInterval? = nil) -> TimerEvent { /* .resting + restDeadline */ }
+    mutating func endRest() -> TimerEvent             { /* clear deadline, back to .running */ }
+    mutating func finish() -> TimerEvent             { phase = .finished; return .finished(.manual) }
+
+    mutating func advanceTime(_ dt: TimeInterval, active: Bool) {
+        guard phase != .idle && phase != .finished else { return }
+        if active && phase == .running {
+            wallClock += dt
+            if workout.mode == .forTime, isClockExpired { phase = .finished }   // clock-cap stop
+        } else if active && phase == .resting {
+            wallClock += dt
+            if let deadline = restDeadline, wallClock >= deadline { restDeadline = nil; phase = .running }
+        } else {                                      // paused / non-active
+            pausedAccumulated += dt
+            wallClock += dt
+        }
     }
-    func finish() -> TimerEvent { phase = .finished; return .finished(.manual) }
-    func advanceTime(_ dt: TimeInterval, active: Bool) {
-        if active, phase == .running { wallClock += dt }
-        if !active { pausedAccumulated += dt }
-        if phase == .resting, let d = restDeadline, wallClock >= d { restDeadline = nil; phase = .running }
+
+    mutating func reset() { /* idle, zero counters, rebuild rounds */ }
+
+    // MARK: - Internal
+    private mutating func reconcileAfterWork() -> TimerEvent {
+        // For every completed round: increment roundsCompleted; AMRAP rounds
+        // regenerate tasks (event = .blockCompleted); finite rounds record once.
+        // If a block defines restAfterBlock, enter .resting until the deadline.
+        // If isWorkoutComplete → phase = .finished, return .finished(.goalReached).
     }
-    func reset() {
-        phase = .idle; roundsCompleted = 0; blockIndex = 0; exerciseIndex = 0
-        repsDonePerExercise.removeAll(); wallClock = 0; pausedAccumulated = 0; isPaused = false; restDeadline = nil
-    }
+    private func locate(_ id: UUID) -> (round: Int, task: Int)? { /* linear search over rounds' tasks */ }
 }
+```
 
-> Note: `SessionSnapshot` (the value type `WorkoutTimerService` republishes) is fully defined in §7. The `tick(now:start:)` method shown here has been removed — the service drives time with an internal `Task` loop, so this method was not part of the final design.
+> **Design rules.** `reconcileAfterWork()` is the single reconcile point: it emits
+> `.blockCompleted` once per finished round (regenerating AMRAP tasks), auto-enters rest, and
+> emits `.finished(.goalReached)` when `isWorkoutComplete`. `completeReps` is no-op unless
+> `phase == .running` and no rest is due, and **caps** logged reps at the task's remaining
+> quota (over-logging is clamped, never negative). "Round completed & rest between rounds" —
+> see §2.3. `SessionSnapshot` (the value type the service republishes) is fully defined in §7.
 
 ---
 
@@ -352,17 +411,18 @@ struct WODSimulator {
 ### Services/WorkoutTimerService.swift (full source)
 ```swift
 import Foundation
-import SwiftUI
 import SwiftData
+import Observation
 
-// MARK: - Published session state the TimerView binds to
-struct SessionSnapshot: Equatable {
+// MARK: - Immutable session state the TimerView observes
+struct SessionSnapshot: Equatable, Sendable {
     var phase: WODSimulator.Phase
     var roundsCompleted: Int
-    var blockIndex: Int
-    var exerciseIndex: Int
-    var repsInCurrentExercise: Int
-    var currentExerciseLabel: String
+    var totalRounds: Int
+    var hasLoopingRounds: Bool
+    var tasks: [WODSimulator.Task]      // the live remaining-set list, per-task counts
+    var totalRepsCompleted: Int
+    var totalRemaining: Int
     var wallClock: TimeInterval
     var activeElapsed: TimeInterval
     var isPaused: Bool
@@ -374,228 +434,178 @@ struct SessionSnapshot: Equatable {
 
 extension SessionSnapshot {
     static var idle: SessionSnapshot {
-        let p = WODSimulator.Phase.idle
-        return SessionSnapshot(phase: p, roundsCompleted: 0, blockIndex: 0, exerciseIndex: 0,
-                               repsInCurrentExercise: 0, currentExerciseLabel: "—",
-                               wallClock: 0, activeElapsed: 0, isPaused: false, isFinished: false)
+        SessionSnapshot(phase: .idle, roundsCompleted: 0, totalRounds: 0,
+                        hasLoopingRounds: false, tasks: [], totalRepsCompleted: 0,
+                        totalRemaining: 0, wallClock: 0, activeElapsed: 0,
+                        isPaused: false, isFinished: false)
     }
 }
 
+@Observable
 @MainActor
-final class WorkoutTimerService: ObservableObject, Identifiable {
-    struct Hook { var onFinish: (WorkoutRecord) -> Void }
+final class WorkoutTimerService: Identifiable {
+    struct Hook { var onFinish: @MainActor @Sendable (WorkoutRecord) -> Void }
 
     let id: UUID
     let workout: Workout
-    private let simulator: WODSimulator
+    private var simulator: WODSimulator
     private let hook: Hook
     private let clock: () -> Date
 
-    @Published private(set) var snapshot: SessionSnapshot
-    @Published private(set) var event: TimerEvent = .none
+    private(set) var snapshot: SessionSnapshot
     private var ticker: Task<Void, Never>?
 
     init(id: UUID = UUID(), workout: Workout,
-         onFinish: @escaping (WorkoutRecord) -> Void,
-         clock: @escaping () -> Date = { Date() }) {
-        self.id = id
-        self.workout = workout
-        self.hook = Hook(onFinish: onFinish)
-        self.clock = clock
-        self.simulator = WODSimulator(workout: workout)
-        self.snapshot = WorkoutTimerService.makeSnapshot(from: simulator)
+         clock: @escaping () -> Date = { Date() },
+         onFinish: @escaping (WorkoutRecord) -> Void) {
+        id, workout, hook, clock, simulator, snapshot = sim.snapshot … // standard init
     }
 
-    private static func makeSnapshot(from s: WODSimulator) -> SessionSnapshot {
-        SessionSnapshot(
-            phase: s.phase,
-            roundsCompleted: s.roundsCompleted,
-            blockIndex: s.blockIndex,
-            exerciseIndex: s.exerciseIndex,
-            repsInCurrentExercise: s.currentRepProgress ?? 0,
-            currentExerciseLabel: label(from: s),
-            wallClock: s.wallClock,
-            activeElapsed: s.wallClock - s.pausedAccumulated,
-            isPaused: s.phase == .paused,
-            isFinished: s.phase == .finished)
-    }
+    // MARK: - Controls
+    func start()  { guard phase != .finished; simulator.start(); publish(); scheduleTicker() }
+    func pause()  { guard .running/.resting; simulator.pause(); stopTicker(); publish() }
+    func resume() { guard .paused; simulator.resume(); publish(); scheduleTicker() }
 
-    private static func label(from s: WODSimulator) -> String {
-        guard s.phase != .finished, let ex = s.currentExercise else {
-            return s.currentBlock?.exercises.last?.movement?.name ?? "\u{2014}"
-        }
-        let base = ex.displayLabel ?? ex.movement?.name ?? "Exercise"
-        if let eff = ex.effectiveReps, eff > 1 {
-            return "\(base) \(ex.reps ?? eff)/\(eff)"
-        }
-        return base
-    }
-
-    // MARK: Control
-    func start() {
-        guard simulator.phase != .finished else { return }
-        simulator.start()
-        event = .none
-        scheduleTicker()
-    }
-
-    func pause() {
-        guard simulator.phase == .running else { return }
-        simulator.phase = .paused
-        event = .none
-        stopTicker()
+    /// The only way to count reps: log `count` against one pending task by ID.
+    @discardableResult
+    func logReps(taskID: UUID, count: Int) -> TimerEvent {
+        let ev = simulator.completeReps(taskID: taskID, count: count)
         publish()
-    }
-
-    func resume() {
-        guard simulator.phase == .paused else { return }
-        simulator.phase = .running
-        event = .none
-        scheduleTicker()
-        publish()
-    }
-
-    func advanceRep() -> TimerEvent {
-        let ev = simulator.advanceRep()
-        event = ev
-        publish()
+        if case .finished = ev { handleFinishedSession() }   // auto-stop: persist record
         return ev
     }
 
-    func startRest() -> TimerEvent { event = .none; publish(); return simulator.startRest() }
-    func endRest()    -> TimerEvent { event = .none; publish(); return simulator.endRest() }
+    func startRest(duration: TimeInterval? = nil) -> TimerEvent { … }
+    func endRest() -> TimerEvent { … }
 
-    // MARK: End of session — this is where a WorkoutRecord is persisted
-    func finish() {
-        if simulator.phase == .running { stopTicker() }
-        simulator.finish()
-        event = .none
+    func finish() {            // manual Finish → persist record
+        if phase is .running/.resting { stopTicker() }
+        _ = simulator.finish()
         publish()
-        let active = simulator.wallClock - simulator.pausedAccumulated
-        let total = simulator.wallClock
-        let record = WorkoutRecord(
-            workout: workout,
-            date: clock(),
-            kind: workout.mode == .forTime ? "rounds" : "time",
-            roundsCompleted: simulator.roundsCompleted,
-            totalReps: simulator.totalRepsDone,
-            elapsedTime: total,
-            pausedTime: simulator.pausedAccumulated,
-            activeTime: active,
-            isPR: ResultsService.isNewPR(workout: workout, kind: record.kind,
-                                         rounds: simulator.roundsCompleted,
-                                         activeTime: active, before: clock())
-        )
-        hook.onFinish(record)
+        handleFinishedSession()
     }
 
-    func reset() {
-        simulator.reset()
-        event = .none
+    func reset() { stopTicker(); simulator.reset(); publish() }
+
+    func advanceTimeStep(_ dt: TimeInterval, active: Bool) {
+        let wasFinished = simulator.phase == .finished
+        simulator.advanceTime(dt, active: active)
+        if simulator.phase == .finished && !wasFinished { handleFinishedSession() }
         publish()
+    }
+
+    // MARK: - End of session — persist a WorkoutRecord
+    private func handleFinishedSession() {
+        stopTicker()
+        let activeTime = simulator.resultActiveTime
+        let record = WorkoutRecord(
+            workout: workout, date: clock(),
+            kind: workout.mode == .forTime ? "rounds" : "time",
+            roundsCompleted: simulator.roundsCompleted,
+            totalReps: simulator.totalRepsCompleted,
+            elapsedTime: simulator.wallClock,
+            pausedTime: simulator.wallClock - activeTime,
+            activeTime: activeTime, isPR: false)
+        hook.onFinish(record)    // ServiceFactory inserts it and marks isPR
     }
 
     private func scheduleTicker() {
         stopTicker()
         ticker = Task { [weak self] in
             while !Task.isCancelled {
-                guard let self else { return }
-                let phase = self.simulator.phase
-                if phase == .paused || phase == .finished { return }
                 try? await Task.sleep(for: .seconds(1))
-                self.simulator.advanceTime(1, active: true)
-                self.publish()
+                guard let self else { return }
+                if self.simulator.phase == .paused || self.simulator.phase == .finished { return }
+                self.advanceTimeStep(1, active: true)   // clock keeps running through rest too
             }
         }
     }
     private func stopTicker() { ticker?.cancel(); ticker = nil }
-    private func publish() { snapshot = WorkoutTimerService.makeSnapshot(from: simulator) }
+    private func publish() { snapshot = simulator.snapshot }
 }
 ```
 
+> **Why `@Observable`, not `ObservableObject`?** The view stores the service in `@State` and
+> must re-render on every 1-second tick and on logReps/pause. An unsubscribed
+> `ObservableObject`/`@Published` object never fans out changes — that exact bug froze the
+> clock and made Pause appear dead. `@Observable` (Observation, iOS 17) lets `@State` tracking
+> pick up buried mutations, so live ticking and Pause work with zero extra wiring.
+
 ### Support/Container.swift + WODCounterApp.swift (bootstrap)
 ```swift
-// Container.swift
+// Container.swift — offline-first, plus an in-memory variant for tests
 import Foundation
 import SwiftData
 
 enum Container {
-    static let schemas: [any PersistentModelType] = [
+    static let schema = Schema([
         Movement.self, Exercise.self, RoundBlock.self, Workout.self, WorkoutRecord.self
-    ]
+    ])
 
-    // Offline default
-    static func local() -> ModelContainer {
-        try! ModelConfiguration(for: schemas, inMemoryOnly: false).modelContainer()
+    static func local() -> ModelContainer {          // app runtime (persistent)
+        let config = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
+        return try! ModelContainer(for: schema, configurations: config)
     }
 
-    // iCloud opt-in (public database, no account)
-    static func cloud() -> ModelContainer {
-        let cloud = ModelConfiguration.CloudKit(
-            configuration: .init(preferenceName: "WODCounter", publicDatabaseName: "WODCounter"))
-        return try! ModelConfiguration(identifier: "WODCounter", inMemory: false).modelContainer(cloud)
+    static func inMemory() -> ModelContainer {       // unit tests
+        let config = ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)
+        return try! ModelContainer(for: schema, configurations: config)
     }
 }
 
 // WODCounterApp.swift
-import SwiftUI
-import SwiftData
-
 @main
 struct WODCounterApp: App {
-    @State private var model = AppModel(serviceFactory)
-    @State private var serviceFactory: ServiceFactory
+    let container: ModelContainer
+    let serviceFactory: ServiceFactory
+    @State private var appModel: AppModel
 
     init() {
         let container = Container.local()
-        serviceFactory = ServiceFactory(container)
-        SeedApplier(container: container).apply()   // idempotent seed
+        self.container = container
+        let factory = ServiceFactory(container)
+        self.serviceFactory = factory
+        self._appModel = State(initialValue: AppModel(factory: factory))
+        SeedMigration.applySeed(to: container)          // idempotent seed
     }
 
     var body: some Scene {
         WindowGroup {
-            NavigationStack {
-                HomeView()
-                    .environment(model)
-                    .environment(serviceFactory)
-            }
-            .navigationDestination(for: Route.detail) { w in WODDetailView(workout: w) }
-            .navigationDestination(for: Route.timer) { w in TimerView(workout: w) }
+            RootView()
+                .environment(appModel)
+                .environment(serviceFactory)
+                .modelContainer(container)
         }
     }
 }
 
-enum Route: Hashable {
-    case detail(Workout)
-    case timer(Workout)
-}
-
-// AppModel.swift
-import SwiftUI
-import SwiftData
-
+// AppModel.swift — @Observable, holds pending workout + results
 @Observable
 final class AppModel {
     var pendingStart: Workout?
     var results: ResultsService
-    init(_ factory: ServiceFactory) { results = ResultsService(context: factory.context) }
-
+    @MainActor init(factory: ServiceFactory) { results = ResultsService(context: factory.context) }
     func startWorkout(_ w: Workout) { pendingStart = w }
 }
 
-// ServiceFactory.swift
-import SwiftUI
-import SwiftData
-
+// ServiceFactory.swift — creates timer services wired to the model context
+@Observable
 @MainActor
 final class ServiceFactory {
     let context: ModelContext
-    init(_ container: ModelContainer) { context = container.mainContext }
+    init(_ container: ModelContainer)   { context = container.mainContext }
+    init(context: ModelContext)         { self.context = context }   // tests
 
-    func makeTimerService(for workout: Workout) -> WorkoutTimerService {
-        WorkoutTimerService(workout: workout) { [weak self] record in
-            self?.context.insert(record)
-            do { try self?.context.save() } catch { /* non-fatal on save */ }
+    func makeTimerService(for workout: Workout,
+                          clock: @escaping @Sendable () -> Date = { Date() }) -> WorkoutTimerService {
+        WorkoutTimerService(workout: workout, clock: clock) { [weak self] record in
+            guard let self else { return }
+            record.isPR = ResultsService.isNewPR(workout: workout, kind: record.kind,
+                                                 rounds: record.roundsCompleted,
+                                                 activeTime: record.activeTime,
+                                                 before: record.date, in: self.context)
+            self.context.insert(record)
+            try? self.context.save()
         }
     }
 }
@@ -771,106 +781,113 @@ struct WODDetailView: View {
 }
 ```
 
-### Views/TimerView.swift
+### Views/TimerView.swift (shape — see the real file for full styles)
 ```swift
 import SwiftUI
-import SwiftData
-import Image
 
 struct TimerView: View {
-    @Environment(ServiceFactory.self) private var factory
+    @Environment(ServiceFactory.self) private var serviceFactory
+    @Environment(\.dismiss) private var dismiss
     let workout: Workout
-    @Environment(AppModel.self) private var model
 
-    @State private var service: WorkoutTimerService?
-    @State private var snapshot: SessionSnapshot = .idle
-    @State private var shareSheet: ResultsCardData?
+    @State private var service: WorkoutTimerService?   // created once in .onAppear, @Observable
+    @State private var selectedTaskID: UUID?          // tap-to-select; auto-advances
+    @State private var isConfirmingFinish = false
+
+    private var snapshot: SessionSnapshot { service?.snapshot ?? .idle }
+    private var isIdle: Bool { snapshot.phase == .idle }
+    private var tasks: [WODSimulator.Task] { snapshot.tasks }
+
+    /// The set the quick counters act on: the selection if still incomplete,
+    /// otherwise the first remaining task (auto-advances as sets complete).
+    private var activeTask: WODSimulator.Task? {
+        if let id = selectedTaskID,
+           let task = tasks.first(where: { $0.id == id }), !task.isComplete { return task }
+        return tasks.first(where: { !$0.isComplete })
+    }
 
     var body: some View {
+        NavigationStack {
+            Group {
+                if isIdle { idleView } else { runningView }
+            }
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { /* Cancel (idle) / Close (running) */ }
+        }
+        .onAppear { if service == nil { service = serviceFactory.makeTimerService(for: workout) } }
+        .confirmationDialog("End Workout Early?", isPresented: $isConfirmingFinish) {
+            Button("End Workout", role: .destructive) { service?.finish() }
+            Button("Cancel", role: .cancel) {}
+        }
+        .sheet(isPresented: .init(get: { snapshot.isFinished }, set: { _ in })) {
+            WorkoutCompletionSheet(workout: workout, snapshot: snapshot) { dismiss() }
+        }
+    }
+
+    // MARK: Idle (pre-start) — scheme preview + explicit Start gate
+    private var idleView: some View {
         VStack(spacing: 24) {
-            Text(workout.name).font(.title2.bold())
-            Text(Format.duration(workout.mode == .topTime ? snapshot.activeElapsed : max(0, (workout.forTimeMinutes ?? 0) * 60 - snapshot.activeElapsed)))
-                .font(.system(size: 64, weight: .bold, design: .monospaced))
-                .contentTransition(.numericText())
-            VStack { Text(snapshot.currentExerciseLabel).font(.headline)
-                      Text("\(snapshot.repsInCurrentExercise) / \(effectiveReps(snapshot))")
-                          .foregroundStyle(.secondary) }
-            HStack(spacing: 16) {
-                Button(action: { if snapshot.isRunning { service?.pause() } else { service?.resume() } }) {
-                    Label(snapshot.isPaused ? "Resume" : "Pause", systemImage: snapshot.isPaused ? "play.fill" : "pause.fill")
-                        .frame(minWidth: 110)
-                }
-                if workout.mode == .topTime {
-                    Button(action: { service?.finish() }) { Label("Finish", systemImage: "flag.fill") }.frame(minWidth: 110)
-                }
-                Button(action: { service?.startRest(); service?.endRest() }) { Label("Rest", systemImage: "hourglass") }
+            Text(workout.name).font(.title.bold())
+            Text(workout.mode == .forTime ? "For Time" : "Top Time").font(.headline).foregroundStyle(.tint)
+            ScrollView { WorkoutSchemeView(workout: workout).padding(.horizontal) }
+            Button { selectedTaskID = tasks.first?.id; service?.start() } label: {
+                Label("Start Workout", systemImage: "play.fill")
             }
+            .buttonStyle(.borderedProminent).tint(.green)
         }
-        .padding()
-        .onChange(of: snapshot.isFinished) { _, finished in if finished { shareSheet = ResultsCardData(workoutName: workout.name, snapshot: snapshot, reason: reason) } }
-        .task { if service == nil { service = factory.makeTimerService(for: workout) } }
-        .sheet(item: $shareSheet) { card in ResultsCardView(data: card) }
     }
 
-    private var reason: FinishedReason {
-        guard snapshot.shouldShowResults else { return .manual }
-        return workout.mode == .forTime ? .clockExpired : .goalReached
-    }
-    private func effectiveReps(_ s: SessionSnapshot) -> Int {
-        guard s.phase != .finished, let ex = s.currentExercise else { return 0 }
-        return ex.effectiveReps
-    }
-}
-
-enum Format {
-    static func duration(_ t: TimeInterval) -> String {
-        let h = Int(t) / 3600, m = (Int(t) % 3600) / 60, sec = Int(t) % 60
-        return String(format: "%02d:%02d:%02d", h, m, sec)
-    }
-    static func timer(_ minutes: Int) -> String { duration(Double(minutes) * 60) }
-}
-
-// The results sheet payload (holds the data).
-struct ResultsCardData: Identifiable {
-    let id = UUID()
-    let workoutName: String
-    let snapshot: SessionSnapshot
-    let reason: FinishedReason
-    var roundsCompleted: Int { snapshot.roundsCompleted }
-}
-
-// Renders the results sheet and offers a Share action.
-struct ResultsCardView: View {
-    let data: ResultsCardData
-
-    var body: some View {
-        VStack(spacing: 20) {
-            Text(data.reason == .goalReached ? "Done!" : "Time's up").font(.largeTitle.bold())
-            Text(resultLine(data))
-                .font(.title)
-                .contentTransition(.numericText())
-            Text(data.workoutName).foregroundStyle(.secondary)
-            ShareLink(item: shareText(for: data)) {
-                Label("Share", systemImage: "square.and.arrow.up")
+    // MARK: Running
+    private var runningView: some View {
+        VStack(spacing: 16) {
+            header                                    // name + "AMRAP · Round N" / "Round N of M"
+            VStack(spacing: 2) {
+                Text(Format.duration(snapshot.activeElapsed))   // live count-up clock
+                    .font(.system(size: 56, weight: .heavy, design: .monospaced))
+                if workout.mode == .forTime { Text("Time Cap 20:00 · Elapsed").foregroundStyle(.tertiary) }
             }
-            Text("Tap to dismiss")
-        }
-        .padding()
-    }
+            if snapshot.phase == .resting { restBanner }        // "Resting…" + Skip Rest → endRest()
 
-    private func resultLine(_ d: ResultsCardData) -> String {
-        switch d.reason {
-        case .clockExpired:
-            return "\(d.roundsCompleted) rounds"
-        case .goalReached, .manual:
-            return "\(Format.duration(d.snapshot.activeElapsed)) · \(d.roundsCompleted) reps"
+            HStack(alignment: .firstTextBaseline) {
+                Text("\(snapshot.totalRemaining)").font(.system(size: 54, weight: .heavy))
+                Text("reps left").foregroundStyle(.secondary)
+            }
+
+            ScrollView {                                    // every set as a selectable row
+                ForEach(tasks) { task in
+                    Button { selectedTaskID = task.id } label: {
+                        HStack {
+                            Text(task.displayLabel)
+                            Spacer()
+                            if task.isComplete { Image(systemName: "checkmark.circle.fill").foregroundStyle(.green) }
+                            else { Text("\(task.remaining) left") }
+                        }
+                    }
+                    .disabled(task.isComplete)
+                }
+            }
+
+            if let task = activeTask {                      // quick counters
+                HStack {
+                    ForEach([1, 5, 10, 25], id: \.self) { count in
+                        Button("+\(count)") { _ = service?.logReps(taskID: task.id, count: count) }
+                            .disabled(!snapshot.isRunning || count > task.remaining)
+                    }
+                }
+            }
+
+            controlBar                                     // Pause/Resume + Finish (with confirm)
         }
-    }
-    private func shareText(for d: ResultsCardData) -> String {
-        "I just completed \(d.workoutName): \(resultLine(d))"
     }
 }
+
+// Completion sheet: trophy icon, "Workout Complete!", rounds (for-time) or time
+// (top-time), "N Total Reps", active time, Done → dismiss.
 ```
+
+> **Auto-start removed.** The previous build auto-called `s.start()` in `.onAppear`; the rework
+> intentionally gates the session behind the Start screen so the clock begins only when the
+> athlete is ready. `WorkoutCompletionSheet` replaces the old share-card sheet.
 
 ### Views/ResultsView.swift
 ```swift
@@ -1010,10 +1027,20 @@ struct SettingsView: View {
 
 ## 11. Testing
 
-- **XCTest** via a testable target. For SwiftData unit tests, use an **in-memory `ModelContainer(for: schema)`** (option: Xcode `Configuration'`/`#if DEBUG` container, or a small `#testable` target — whatever fits the project; keep the SAME code in the app).
+- **XCTest** via a testable target. For SwiftData unit tests, construct `ModelContext(Container.inMemory())`
+  — **do not** use `Container.inMemory().mainContext` inside Swift Testing suites (it caused a
+  test-runner hang / cascade failures). Order-robust lookups are mandatory: SwiftData `@Relationship`
+  to-many arrays are **unordered**, so tests find tasks by `displayLabel`/`movementName`, never by index.
 - **Required tests:**
-  - `WODSimulatorTests`: Cindy (5/10/15 → round 1, cycles); Murph top-time (100/200/300 → auto-stop, rounds=1); Fran (21/15/9 → 3 rounds, auto-stop); DT (×5 → 5 rounds); Helen (×3 → 3 rounds); distanced-only (reps nil → effectiveReps 1).
-  - `WorkoutTimerServiceTests`: pause accumulates and active time subtracts it; finish persists a `WorkoutRecord` with correct activeTime (fake clock/time provider).
+  - `WODSimulatorTests`: Cindy (3 tasks 5/10/15, AMRAP regenerates a fresh wave each round until
+    `advanceTime(1201)` clock-cap expiry → finished); Murph top-time (600 reps, free-form/any order →
+    auto-stop `.finished(.goalReached)`, rounds=1); Fran (6 tasks 21/21/15/15/9/9 in scrambled order →
+    3 rounds, auto-stop, 90 total reps); DT (repeat=5 → **15 per-round sets**, 135 reps → 5 rounds);
+    Helen (9 tasks, Run quota **1** → 102 total); over-logging is capped at remaining; logging while
+    idle is ignored; pause freezes active time; manual finish.
+  - `WorkoutTimerServiceTests`: pause accumulates and active time subtracts it; finishing persists a
+    `WorkoutRecord` with correct activeTime (fake clock); completing every task via `logReps(taskID:count:)`
+    auto-persists the record (Fran → 3 rounds, PR on first attempt).
   - `ResultsServiceTests`: window counts; PR detection (first attempt = PR, later improve/non-improve handled); delta computation.
   - `BenchmarkSeedTests`: correct block/rep counts and pre-rendered labels.
 - Every task ends green and committed. **No placeholders.** All steps carry real code.

@@ -3,7 +3,7 @@
 - **Status:** Approved (user sign-off pending)
 - **Platform:** iOS (Apple-native)
 - **Stack:** SwiftUI + SwiftData + Swift Concurrency
-- **Version:** 1.0 spec (updated for Girl / Hero WOD library)
+- **Version:** 1.1 spec (free-form task tracker supersedes the per-rep cycling counter)
 
 ---
 
@@ -23,7 +23,7 @@ The predefined library follows the real **Girl** and **Hero** WOD catalog, suppo
 - **Predefined benchmark library** seeded from the Girl / Hero catalog (see § 8), including Cindy and Murph, extending to Fran, Angie, Grace, Diane, Helen, DT, and similar well-known benchmarks.
 - **Custom workout creation** from a shipped movement catalog; custom WODs are editable and savable.
 - **Two execution modes:** **For-time** and **Top-time**.
-- **Per-rep cycling counter** that drives both modes; rounds tracked internally.
+- **Free-form task tracker** that drives both modes: every exercise set (exercise × round) is a *task* with a remaining-rep count; the athlete logs reps against **any task in any order** via quick counters; rounds are tracked internally.
 - **Pause/Resume**; paused time tracked and subtracted from active time (for-time).
 - **Optional per-workout rest between rounds** (e.g. Barbara 5 rounds, 3 min rest); continuous WODs leave it off.
 - SwiftData local storage + **optional iCloud sync**.
@@ -126,15 +126,15 @@ A named set of `RoundBlock`s with a mode (predefined benchmark OR user-created).
 ### Flow A — Start a for-time WOD (Cindy)
 1. Home lists WODs (builtins first, grouped Girl / Hero, then custom). Tap **Cindy**.
 2. Detail shows scheme (5/10/15), mode **For-time 20:00**, movement labels, a **Start** button.
-3. Tap Start → timer screen: clock at 20:00, per-movement cycling counter at round 0.
-4. The cycling counter shows the current exercise and reps completed for it this pass; tapping advances one rep and cycles through exercises. Completing all quotas advances the round counter internally (one play of the current `RoundBlock`).
+3. Tap Start → timer screen: an initial **Start Workout** gate showing the scheme, then the count-up clock at 00:00 with the remaining-set list at round 0.
+4. Every set is listed as a task with its remaining rep count ("21 Thrusters (95 lb) — 21 left"). Tap a set to select it, then log reps with the **+1/+5/+10/+25** quick counters — in any order. Depleting every set in a block advances the round counter internally (one play of the current `RoundBlock`); AMRAP blocks regenerate a fresh wave and the clock keeps running.
 5. **Pause/Resume**: freezing the clock; paused seconds accumulate and are subtracted from active time. Rest-between-rounds (if any) is handled automatically when a round completes.
 6. Tap **Finish** → attempt saved (resultType = rounds, roundCount, elapsedTime, pausedTime, activeTime).
 
 ### Flow B — Start a top-time WOD
 1. Pick a top-time workout.
 2. Timer screen shows progress toward the final block; **Start**.
-3. The cycling counter advances reps per exercise; the app detects the final rep and **auto-stops**, recording elapsed active time.
+3. Reps are logged against any remaining set (same free-form tracker); the app detects the session end when **every task is depleted** and **auto-stops**, recording elapsed active time.
 4. Results overlay shows the time; **Share** and **Finish** (early end, if any).
 
 ### Flow C — History / stats
@@ -149,7 +149,7 @@ A named set of `RoundBlock`s with a mode (predefined benchmark OR user-created).
 ## 5. UI Screens (proposed)
 1. **Home** — WODs grouped by category (Girl / Hero), then Custom; Start buttons; quick entry to results.
 2. **WOD Detail** — scheme, movement labels (with weight/distance/equipment), mode, Start, edit/delete.
-3. **Timer** — core screen: big clock, per-movement cycling counter, Pause/Resume, Finish; rest indicator when applicable.
+3. **Timer** — core screen: big count-up clock with time-cap label, free-form remaining-set tracker with quick counters, Pause/Resume, Finish; rest indicator when applicable.
 4. **Results / History** — window summary, PRs, chart, attempts drill-down.
 5. **Create WOD** — form for building custom workouts.
 6. **Settings** — iCloud sync toggle, time-window default, preferences.
@@ -177,13 +177,13 @@ A named set of `RoundBlock`s with a mode (predefined benchmark OR user-created).
 ┌───────────────────────────────────────────────┐
 │  Services                                       │
 │   WorkoutTimerService (clock, pause, rest,     │
-│   cycling counter, auto-stop, active time)     │
+│   task tracker, auto-stop, active time)        │
 │   ResultsService (windowed aggregation/PRs)    │
 │   SyncService (optional iCloud CloudKit)        │
 └───────────────────────────────────────────────┘
 ```
 
-- **Timer logic** lives in a `WorkoutTimerService` (actor/class) so the view stays declarative; it owns start/pause/resume/finish, the cycling counter, optional per-round rest, and active-time computation.
+- **Timer logic** lives in a `WorkoutTimerService` (actor/class) so the view stays declarative; it owns start/pause/resume/finish, the free-form task tracker, optional per-round rest, and active-time computation.
 - On **finish / auto-stop**, the service writes the `WorkoutAttempt` + `WorkoutRecord` via the `ModelContext`.
 - **ResultsService** provides pure functions/queries for windowed stats, bests, and PR detection ("is this attempt better than the user's prior best for that workout").
 - **SyncService**: CloudKit-backed SwiftData container. Sync **opt-in** (Settings toggle); defaults to on per plan but graceful when unavailable/disabled.
@@ -229,8 +229,9 @@ Movement taxonomy supported from the start: bodyweight, barbell (squat/clean&jer
 - Clear timer and rest indicators so counting/miscounting is minimized.
 
 ## 10. Acceptance Criteria
-- [ ] Can run Cindy (for-time 20 min) using the cycling counter; pausing subtracts from active time; Finish saves a `WorkoutRecord`.
-- [ ] Can run Murph (top-time, bodyweight) and the timer auto-stops at the final rep, recording elapsed active time.
+- [ ] Can run Cindy (for-time 20 min) using the free-form tracker; pausing subtracts from active time; Finish saves a `WorkoutRecord`.
+- [ ] Can run Murph (top-time, bodyweight) and the timer auto-stops when every set is depleted, recording elapsed active time.
+- [ ] Can complete sets **out of program order** (e.g. finish squats before pull-ups in Murph) and the session still auto-stops correctly.
 - [ ] Can run a descending/multi-block WOD (Fran-style) where each block is a round and the session auto-stops.
 - [ ] Can build a custom WOD with reps + weight/distance + equipment + optional rest between rounds; it syncs (if iCloud on).
 - [ ] Results screen shows 7/30/90-day/all-time windows, per-WOD bests, PRs, Δ vs. last, a progress chart, and a share card.

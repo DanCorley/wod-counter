@@ -260,7 +260,7 @@ struct TimerView: View {
                 .bold()
             Spacer()
             Button("Skip Rest") {
-                service?.endRest()
+                _ = service?.endRest()
             }
             .buttonStyle(.bordered)
             .tint(.orange)
