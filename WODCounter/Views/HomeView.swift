@@ -5,6 +5,7 @@ struct HomeView: View {
     @Query(sort: \Workout.name) private var workouts: [Workout]
     @Environment(\.modelContext) private var modelContext
     @State private var isShowingSettings = false
+    @State private var isShowingCreate = false
 
     private var girlWorkouts: [Workout] {
         workouts.filter { $0.isGirlBenchmark }
@@ -49,10 +50,22 @@ struct HomeView: View {
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Button {
+                    isShowingCreate = true
+                } label: {
+                    Image(systemName: "plus")
+                }
+            }
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
                     isShowingSettings = true
                 } label: {
                     Image(systemName: "gearshape")
                 }
+            }
+        }
+        .sheet(isPresented: $isShowingCreate) {
+            NavigationStack {
+                CreateWODView()
             }
         }
         .sheet(isPresented: $isShowingSettings) {
