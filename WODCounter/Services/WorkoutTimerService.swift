@@ -1,10 +1,10 @@
 import Foundation
-import Combine
-import SwiftUI
 import SwiftData
+import Observation
 
+@Observable
 @MainActor
-final class WorkoutTimerService: ObservableObject, Identifiable {
+final class WorkoutTimerService: Identifiable {
     struct Hook: Sendable {
         var onFinish: @MainActor @Sendable (WorkoutRecord) -> Void
     }
@@ -15,8 +15,7 @@ final class WorkoutTimerService: ObservableObject, Identifiable {
     private let hook: Hook
     private let clock: @Sendable () -> Date
 
-    @Published private(set) var snapshot: SessionSnapshot
-    @Published private(set) var event: TimerEvent = .none
+    private(set) var snapshot: SessionSnapshot
     private var ticker: Task<Void, Never>?
 
     init(
@@ -38,7 +37,6 @@ final class WorkoutTimerService: ObservableObject, Identifiable {
     func start() {
         guard simulator.phase != .finished else { return }
         simulator.start()
-        event = .none
         publish()
         scheduleTicker()
     }
@@ -46,7 +44,6 @@ final class WorkoutTimerService: ObservableObject, Identifiable {
     func pause() {
         guard simulator.phase == .running || simulator.phase == .resting else { return }
         simulator.pause()
-        event = .none
         stopTicker()
         publish()
     }
@@ -54,14 +51,14 @@ final class WorkoutTimerService: ObservableObject, Identifiable {
     func resume() {
         guard simulator.phase == .paused else { return }
         simulator.resume()
-        event = .none
         publish()
         scheduleTicker()
     }
 
-    func advanceRep() -> TimerEvent {
-        let ev = simulator.advanceRep()
-        event = ev
+    /// Logs completed reps against any pending task. Returns the resulting event.
+    @discardableResult
+    func logReps(taskID: UUID, count: Int) -> TimerEvent {
+        let ev = simulator.completeReps(taskID: taskID, count: count)
         publish()
         if case .finished = ev {
             handleFinishedSession()
@@ -71,14 +68,12 @@ final class WorkoutTimerService: ObservableObject, Identifiable {
 
     func startRest(duration: TimeInterval? = nil) -> TimerEvent {
         let ev = simulator.startRest(duration: duration)
-        event = ev
         publish()
         return ev
     }
 
     func endRest() -> TimerEvent {
         let ev = simulator.endRest()
-        event = ev
         publish()
         return ev
     }
@@ -87,8 +82,7 @@ final class WorkoutTimerService: ObservableObject, Identifiable {
         if simulator.phase == .running || simulator.phase == .resting {
             stopTicker()
         }
-        let ev = simulator.finish()
-        event = ev
+        _ = simulator.finish()
         publish()
         handleFinishedSession()
     }
@@ -96,7 +90,6 @@ final class WorkoutTimerService: ObservableObject, Identifiable {
     func reset() {
         stopTicker()
         simulator.reset()
-        event = .none
         publish()
     }
 
@@ -154,9 +147,5 @@ final class WorkoutTimerService: ObservableObject, Identifiable {
 
     private func publish() {
         snapshot = simulator.snapshot
-    }
-
-    deinit {
-        ticker?.cancel()
     }
 }

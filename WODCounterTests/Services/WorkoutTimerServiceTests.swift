@@ -88,9 +88,10 @@ final class WorkoutTimerServiceTests: XCTestCase {
 
         timerService.start()
 
-        // Advance through all 3 blocks (90 reps total)
+        // Log all 90 reps across the free-form task list (any order).
         for _ in 1...90 {
-            _ = timerService.advanceRep()
+            guard let task = timerService.snapshot.tasks.first(where: { !$0.isComplete }) else { break }
+            _ = timerService.logReps(taskID: task.id, count: 1)
         }
 
         // Advance 180 seconds active time

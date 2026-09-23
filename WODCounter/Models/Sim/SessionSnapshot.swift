@@ -3,10 +3,11 @@ import Foundation
 struct SessionSnapshot: Equatable, Sendable {
     var phase: WODSimulator.Phase
     var roundsCompleted: Int
-    var blockIndex: Int
-    var exerciseIndex: Int
-    var repsInCurrentExercise: Int
-    var currentExerciseLabel: String
+    var totalRounds: Int
+    var hasLoopingRounds: Bool
+    var tasks: [WODSimulator.Task]
+    var totalRepsCompleted: Int
+    var totalRemaining: Int
     var wallClock: TimeInterval
     var activeElapsed: TimeInterval
     var isPaused: Bool
@@ -21,10 +22,11 @@ extension SessionSnapshot {
         SessionSnapshot(
             phase: .idle,
             roundsCompleted: 0,
-            blockIndex: 0,
-            exerciseIndex: 0,
-            repsInCurrentExercise: 0,
-            currentExerciseLabel: "—",
+            totalRounds: 0,
+            hasLoopingRounds: false,
+            tasks: [],
+            totalRepsCompleted: 0,
+            totalRemaining: 0,
             wallClock: 0,
             activeElapsed: 0,
             isPaused: false,
