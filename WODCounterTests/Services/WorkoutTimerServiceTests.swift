@@ -26,7 +26,7 @@ final class WorkoutTimerServiceTests: XCTestCase {
     // MARK: - State & Controls Tests
     @MainActor
     func testStartPauseResumeAndTicking() {
-        let cindy = BenchmarkSeed.cindy(context: context)
+        let cindy = BenchmarkSeed.cindy(in: context)
         var finishedRecord: WorkoutRecord?
 
         let service = WorkoutTimerService(workout: cindy) { record in
@@ -81,7 +81,7 @@ final class WorkoutTimerServiceTests: XCTestCase {
     // MARK: - ServiceFactory Persistence & PR Verification
     @MainActor
     func testServiceFactoryPersistsRecordWithPRStatus() {
-        let fran = BenchmarkSeed.fran(context: context)
+        let fran = BenchmarkSeed.fran(in: context)
         let fixedDate = Date()
 
         let timerService = factory.makeTimerService(for: fran, clock: { fixedDate })
@@ -116,7 +116,7 @@ final class WorkoutTimerServiceTests: XCTestCase {
     @MainActor
     func testAppModelInitializationAndState() {
         let appModel = AppModel(factory: factory)
-        let cindy = BenchmarkSeed.cindy(context: context)
+        let cindy = BenchmarkSeed.cindy(in: context)
 
         XCTAssertNil(appModel.pendingStart)
         appModel.startWorkout(cindy)

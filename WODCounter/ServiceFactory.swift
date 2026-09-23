@@ -2,6 +2,9 @@ import Foundation
 import SwiftData
 import SwiftUI
 
+import Observation
+
+@Observable
 @MainActor
 final class ServiceFactory {
     let context: ModelContext

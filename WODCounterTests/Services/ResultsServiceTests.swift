@@ -39,7 +39,7 @@ final class ResultsServiceTests: XCTestCase {
     // MARK: - PR Detection Tests
     @MainActor
     func testForTimePRDetection() {
-        let cindy = BenchmarkSeed.cindy(context: context)
+        let cindy = BenchmarkSeed.cindy(in: context)
         let now = Date()
         let dayAgo = now.addingTimeInterval(-86400)
         let twoDaysAgo = now.addingTimeInterval(-172800)
@@ -106,7 +106,7 @@ final class ResultsServiceTests: XCTestCase {
 
     @MainActor
     func testTopTimePRDetection() {
-        let fran = BenchmarkSeed.fran(context: context)
+        let fran = BenchmarkSeed.fran(in: context)
         let now = Date()
         let dayAgo = now.addingTimeInterval(-86400)
         let twoDaysAgo = now.addingTimeInterval(-172800)
@@ -174,7 +174,7 @@ final class ResultsServiceTests: XCTestCase {
     // MARK: - Window Summary & History Tests
     @MainActor
     func testWindowSummaryAndFiltering() {
-        let cindy = BenchmarkSeed.cindy(context: context)
+        let cindy = BenchmarkSeed.cindy(in: context)
         let now = Date()
         let past3Days = now.addingTimeInterval(-3 * 86400)
         let past40Days = now.addingTimeInterval(-40 * 86400)

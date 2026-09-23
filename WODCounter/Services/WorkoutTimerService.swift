@@ -1,11 +1,12 @@
 import Foundation
+import Combine
 import SwiftUI
 import SwiftData
 
 @MainActor
 final class WorkoutTimerService: ObservableObject, Identifiable {
     struct Hook: Sendable {
-        var onFinish: @Sendable (WorkoutRecord) -> Void
+        var onFinish: @MainActor @Sendable (WorkoutRecord) -> Void
     }
 
     let id: UUID
@@ -22,7 +23,7 @@ final class WorkoutTimerService: ObservableObject, Identifiable {
         id: UUID = UUID(),
         workout: Workout,
         clock: @escaping @Sendable () -> Date = { Date() },
-        onFinish: @escaping @Sendable (WorkoutRecord) -> Void
+        onFinish: @escaping @MainActor @Sendable (WorkoutRecord) -> Void
     ) {
         self.id = id
         self.workout = workout
@@ -100,8 +101,9 @@ final class WorkoutTimerService: ObservableObject, Identifiable {
     }
 
     func advanceTimeStep(_ dt: TimeInterval, active: Bool) {
+        let wasFinished = simulator.phase == .finished
         simulator.advanceTime(dt, active: active)
-        if simulator.phase == .finished {
+        if simulator.phase == .finished && !wasFinished {
             handleFinishedSession()
         }
         publish()

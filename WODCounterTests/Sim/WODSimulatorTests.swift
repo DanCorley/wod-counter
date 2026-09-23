@@ -23,7 +23,7 @@ final class WODSimulatorTests: XCTestCase {
     // MARK: - Cindy (AMRAP For-Time)
     @MainActor
     func testCindyAMRAPLoopsUntilClockOrExpiry() {
-        let cindy = BenchmarkSeed.cindy(context: context)
+        let cindy = BenchmarkSeed.cindy(in: context)
         var sim = WODSimulator(workout: cindy)
 
         XCTAssertEqual(sim.phase, .idle)
@@ -89,7 +89,7 @@ final class WODSimulatorTests: XCTestCase {
     // MARK: - Murph (Single-Block Top-Time Auto-Stop)
     @MainActor
     func testMurphTopTimeAutoStopsOnFinalRep() {
-        let murph = BenchmarkSeed.murph(context: context)
+        let murph = BenchmarkSeed.murph(in: context)
         var sim = WODSimulator(workout: murph)
 
         sim.start()
@@ -124,7 +124,7 @@ final class WODSimulatorTests: XCTestCase {
     // MARK: - Fran (Multi-Block Descending Scheme: 21-15-9)
     @MainActor
     func testFran3BlocksDescendingAutoStops() {
-        let fran = BenchmarkSeed.fran(context: context)
+        let fran = BenchmarkSeed.fran(in: context)
         var sim = WODSimulator(workout: fran)
 
         XCTAssertEqual(fran.blocks.count, 3)
@@ -162,7 +162,7 @@ final class WODSimulatorTests: XCTestCase {
     // MARK: - DT (Single-Block Repeat: 5 Rounds)
     @MainActor
     func testDT5RoundsAutoStops() {
-        let dt = BenchmarkSeed.dt(context: context)
+        let dt = BenchmarkSeed.dt(in: context)
         var sim = WODSimulator(workout: dt)
 
         sim.start()
@@ -191,7 +191,7 @@ final class WODSimulatorTests: XCTestCase {
     // MARK: - Distanced-Only Exercises (Effective Rep Quota = 1)
     @MainActor
     func testDistancedOnlyExerciseHasEffectiveRepsOne() {
-        let helen = BenchmarkSeed.helen(context: context)
+        let helen = BenchmarkSeed.helen(in: context)
         var sim = WODSimulator(workout: helen)
 
         sim.start()
@@ -209,7 +209,7 @@ final class WODSimulatorTests: XCTestCase {
     // MARK: - Pause & Active Time Calculation
     @MainActor
     func testPauseFreezesActiveTimeAndAccumulatesPausedTime() {
-        let cindy = BenchmarkSeed.cindy(context: context)
+        let cindy = BenchmarkSeed.cindy(in: context)
         var sim = WODSimulator(workout: cindy)
 
         sim.start()
@@ -237,7 +237,7 @@ final class WODSimulatorTests: XCTestCase {
     // MARK: - Manual Finish
     @MainActor
     func testManualFinishEndsWorkout() {
-        let cindy = BenchmarkSeed.cindy(context: context)
+        let cindy = BenchmarkSeed.cindy(in: context)
         var sim = WODSimulator(workout: cindy)
 
         sim.start()
