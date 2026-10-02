@@ -49,10 +49,14 @@ struct ResultsViewTests {
         daysAgo: Int,
         rounds: Int,
         activeTime: TimeInterval,
-        isPR: Bool = false
+        isPR: Bool = false,
+        /// Defaults to a complete effort for the workout's mode, so existing
+        /// expectations stay meaningful; pass `.manual` for an abandoned one.
+        finishedReason: FinishedReason? = nil
     ) -> WorkoutRecord {
         let date = Calendar.current.date(byAdding: .day, value: -daysAgo, to: Date())!
         let kind = workout.mode == .forTime ? "rounds" : "time"
+        let reason = finishedReason ?? (workout.mode == .forTime ? .clockExpired : .goalReached)
         let record = WorkoutRecord(
             workout: workout,
             date: date,
@@ -62,7 +66,8 @@ struct ResultsViewTests {
             elapsedTime: activeTime + 10,
             pausedTime: 10,
             activeTime: activeTime,
-            isPR: isPR
+            isPR: isPR,
+            finishedReason: reason.rawValue
         )
         context.insert(record)
         return record
@@ -168,6 +173,63 @@ struct ResultsViewTests {
         #expect(summary.bestRounds == 0)
     }
 
+    // MARK: - Abandoned attempts must not become the best
+
+    /// Found by manual testing: PR *detection* was gated on completing the
+    /// work, but the displayed "best" still took min(activeTime) over every
+    /// record — so an abandoned 5-second attempt showed as the best time on
+    /// the history screen while the PR flag correctly sat on the completed
+    /// attempt. Same rule, two code paths, only one was fixed.
+    @Test func abandonedAttemptIsNotTheBestTime() throws {
+        let container = Container.inMemory()
+        let context = ModelContext(container)
+        let service = ResultsService(context: context)
+        let workout = makeWorkout(context: context, mode: .topTime)
+
+        insertRecord(workout: workout, context: context, daysAgo: 5,
+                     rounds: 3, activeTime: 240, isPR: true)
+        // Gave up after 5 seconds: faster, but not a comparable effort.
+        insertRecord(workout: workout, context: context, daysAgo: 1,
+                     rounds: 0, activeTime: 5, finishedReason: .manual)
+
+        let best = service.best(for: workout, window: nil)
+        #expect(best?.activeTime == 240, "An abandoned attempt must not be the best")
+
+        let summary = service.summary(for: workout)
+        #expect(summary.bestTime == 240, "The summary banner must agree")
+    }
+
+    @Test func manuallyStoppedAMRAPIsNotTheBestRounds() throws {
+        let container = Container.inMemory()
+        let context = ModelContext(container)
+        let service = ResultsService(context: context)
+        let workout = makeWorkout(context: context, mode: .forTime)
+
+        insertRecord(workout: workout, context: context, daysAgo: 5,
+                     rounds: 12, activeTime: 1200, isPR: true)
+        // Stopped early, so fewer rounds — but also not comparable even if more.
+        insertRecord(workout: workout, context: context, daysAgo: 1,
+                     rounds: 20, activeTime: 400, finishedReason: .manual)
+
+        let best = service.best(for: workout, window: nil)
+        #expect(best?.roundsCompleted == 12, "An early stop must not be the best rounds")
+        #expect(service.summary(for: workout).bestRounds == 12)
+    }
+
+    @Test func aWorkoutWithOnlyAbandonedAttemptsHasNoBest() throws {
+        let container = Container.inMemory()
+        let context = ModelContext(container)
+        let service = ResultsService(context: context)
+        let workout = makeWorkout(context: context, mode: .topTime)
+
+        insertRecord(workout: workout, context: context, daysAgo: 1,
+                     rounds: 0, activeTime: 5, finishedReason: .manual)
+
+        #expect(service.best(for: workout, window: nil) == nil)
+        // History still lists the attempt — it happened, it just isn't ranked.
+        #expect(service.history(for: workout).count == 1)
+    }
+
     // MARK: - Best Record
 
     @Test func bestForTimeIsHighestRounds() throws {
@@ -180,10 +242,9 @@ struct ResultsViewTests {
         insertRecord(workout: workout, context: context, daysAgo: 5, rounds: 15, activeTime: 700)
         insertRecord(workout: workout, context: context, daysAgo: 10, rounds: 8, activeTime: 500)
 
-        let records = service.history(for: workout, window: nil)
-        let best = records.max(by: { $0.roundsCompleted < $1.roundsCompleted })
-
-        #expect(best?.roundsCompleted == 15)
+        // Calls the production selection rather than reimplementing max() here,
+        // which is what let the "best" bug through in the first place.
+        #expect(service.best(for: workout, window: nil)?.roundsCompleted == 15)
     }
 
     @Test func bestTopTimeIsLowestActiveTime() throws {
@@ -196,10 +257,7 @@ struct ResultsViewTests {
         insertRecord(workout: workout, context: context, daysAgo: 5, rounds: 1, activeTime: 450)
         insertRecord(workout: workout, context: context, daysAgo: 10, rounds: 1, activeTime: 720)
 
-        let records = service.history(for: workout, window: nil)
-        let best = records.min(by: { $0.activeTime < $1.activeTime })
-
-        #expect(best?.activeTime == 450)
+        #expect(service.best(for: workout, window: nil)?.activeTime == 450)
     }
 
     // MARK: - Delta Computation

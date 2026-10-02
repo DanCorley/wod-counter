@@ -198,7 +198,8 @@ final class ResultsServiceTests: XCTestCase {
             elapsedTime: 1200,
             pausedTime: 0,
             activeTime: 1200,
-            isPR: true
+            isPR: true,
+            finishedReason: FinishedReason.clockExpired.rawValue
         )
         let recordOld = WorkoutRecord(
             workout: cindy,
@@ -209,7 +210,8 @@ final class ResultsServiceTests: XCTestCase {
             elapsedTime: 1200,
             pausedTime: 0,
             activeTime: 1200,
-            isPR: true
+            isPR: true,
+            finishedReason: FinishedReason.clockExpired.rawValue
         )
         context.insert(recordRecent)
         context.insert(recordOld)

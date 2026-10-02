@@ -26,6 +26,24 @@ import SwiftData
         finishedReason == FinishedReason.goalReached.rawValue
     }
 
+    /// Whether this attempt may be ranked against others — as a PR, as a
+    /// "best", in a delta, or on the progression chart.
+    ///
+    /// The single definition of that rule. It previously existed only inside
+    /// the PR check, so the history screen's "best" ranked abandoned attempts
+    /// and happily showed a 5-second Fran as the time to beat.
+    ///
+    /// A time is comparable only if the prescribed work was completed, and a
+    /// round count only if the clock ran its full course; a manual stop is
+    /// neither.
+    var isRankable: Bool {
+        switch kind {
+        case "time":   return finishedReason == FinishedReason.goalReached.rawValue
+        case "rounds": return finishedReason == FinishedReason.clockExpired.rawValue
+        default:       return false
+        }
+    }
+
     /// Fraction of prescribed reps completed, when the quota is known.
     var completionFraction: Double? {
         guard let repsQuota, repsQuota > 0 else { return nil }

@@ -182,11 +182,18 @@ private struct WODBestRow: View {
     /// Handed in already fetched — see `ResultsView.recordsByWorkout`.
     let records: [WorkoutRecord]
 
+    /// Only comparable efforts are ranked — an abandoned attempt's fast time is
+    /// not a result. Mirrors `ResultsService.best(for:)` over the slice this
+    /// row was handed.
+    private var rankedRecords: [WorkoutRecord] {
+        records.filter(\.isRankable)
+    }
+
     private var bestRecord: WorkoutRecord? {
         if workout.mode == .forTime {
-            return records.max(by: { $0.roundsCompleted < $1.roundsCompleted })
+            return rankedRecords.max(by: { $0.roundsCompleted < $1.roundsCompleted })
         } else {
-            return records.min(by: { $0.activeTime < $1.activeTime })
+            return rankedRecords.min(by: { $0.activeTime < $1.activeTime })
         }
     }
 
@@ -198,10 +205,10 @@ private struct WODBestRow: View {
     }
 
     private var deltaText: String? {
-        guard records.count >= 2, let best = bestRecord else { return nil }
+        guard rankedRecords.count >= 2, let best = bestRecord else { return nil }
 
         // Second-best attempt (excluding the best record itself)
-        let others = records.filter { $0.id != best.id }
+        let others = rankedRecords.filter { $0.id != best.id }
 
         if workout.mode == .forTime {
             guard let prevBest = others.max(by: { $0.roundsCompleted < $1.roundsCompleted }) else { return nil }
@@ -309,7 +316,10 @@ struct WODAttemptsView: View {
 
     /// Points for the best-over-time bar chart: (date, metric value).
     private var chartData: [(date: Date, value: Double)] {
+        // Progression only means something across comparable efforts: an
+        // abandoned attempt would plot as a sudden, misleading improvement.
         records
+            .filter(\.isRankable)
             .sorted(by: { $0.date < $1.date })
             .map { record in
                 let value = workout.mode == .forTime
