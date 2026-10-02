@@ -2,36 +2,20 @@ import SwiftUI
 
 struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
-    @AppStorage("cloudKitEnabled") private var cloudKitEnabled = false
-    @AppStorage("defaultWindow") private var defaultWindow = "30d"
+    // Same key and same tag values as the History screen, via ResultsWindow.
+    @AppStorage(ResultsWindow.defaultsKey) private var storedWindow: String = ResultsWindow.fallback.rawValue
 
     var body: some View {
         Form {
-            Section {
-                Toggle(isOn: $cloudKitEnabled) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("iCloud Sync")
-                        Text("Sync workouts and history across your Apple devices using private CloudKit storage.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+            Section("History Preferences") {
+                Picker("Default Time Window", selection: $storedWindow) {
+                    ForEach(ResultsWindow.allCases) { window in
+                        Text(window.label).tag(window.rawValue)
                     }
                 }
-            } header: {
-                Text("Sync & Storage")
-            } footer: {
-                Text("Changes to sync settings will take effect on next app launch.")
             }
 
-            Section("History Preferences") {
-                Picker("Default Time Window", selection: $defaultWindow) {
-                    Text("Past 7 Days").tag("7d")
-                    Text("Past 30 Days").tag("30d")
-                    Text("Past 90 Days").tag("90d")
-                    Text("All Time").tag("all")
-                }
-            }
-
-            Section("About") {
+            Section {
                 HStack {
                     Text("Version")
                     Spacer()
@@ -44,6 +28,10 @@ struct SettingsView: View {
                     Text("Offline-First")
                         .foregroundStyle(.secondary)
                 }
+            } header: {
+                Text("About")
+            } footer: {
+                Text("Workouts and history are stored on this device only.")
             }
         }
         .navigationTitle("Settings")

@@ -51,6 +51,7 @@ final class ResultsServiceTests: XCTestCase {
             rounds: 15,
             activeTime: 1200,
             before: twoDaysAgo,
+            finishedReason: FinishedReason.clockExpired.rawValue,
             in: context
         )
         XCTAssertTrue(isFirstPR)
@@ -64,7 +65,8 @@ final class ResultsServiceTests: XCTestCase {
             elapsedTime: 1200,
             pausedTime: 0,
             activeTime: 1200,
-            isPR: true
+            isPR: true,
+            finishedReason: FinishedReason.clockExpired.rawValue
         )
         context.insert(record1)
 
@@ -75,6 +77,7 @@ final class ResultsServiceTests: XCTestCase {
             rounds: 14,
             activeTime: 1200,
             before: dayAgo,
+            finishedReason: FinishedReason.clockExpired.rawValue,
             in: context
         )
         XCTAssertFalse(isSecondPR)
@@ -88,7 +91,8 @@ final class ResultsServiceTests: XCTestCase {
             elapsedTime: 1200,
             pausedTime: 0,
             activeTime: 1200,
-            isPR: false
+            isPR: false,
+            finishedReason: FinishedReason.clockExpired.rawValue
         )
         context.insert(record2)
 
@@ -99,6 +103,7 @@ final class ResultsServiceTests: XCTestCase {
             rounds: 18,
             activeTime: 1200,
             before: now,
+            finishedReason: FinishedReason.clockExpired.rawValue,
             in: context
         )
         XCTAssertTrue(isThirdPR)
@@ -118,6 +123,7 @@ final class ResultsServiceTests: XCTestCase {
             rounds: 3,
             activeTime: 300,
             before: twoDaysAgo,
+            finishedReason: FinishedReason.goalReached.rawValue,
             in: context
         )
         XCTAssertTrue(isFirstPR)
@@ -131,7 +137,8 @@ final class ResultsServiceTests: XCTestCase {
             elapsedTime: 300,
             pausedTime: 0,
             activeTime: 300,
-            isPR: true
+            isPR: true,
+            finishedReason: FinishedReason.goalReached.rawValue
         )
         context.insert(record1)
 
@@ -142,6 +149,7 @@ final class ResultsServiceTests: XCTestCase {
             rounds: 3,
             activeTime: 320,
             before: dayAgo,
+            finishedReason: FinishedReason.goalReached.rawValue,
             in: context
         )
         XCTAssertFalse(isSecondPR)
@@ -155,7 +163,8 @@ final class ResultsServiceTests: XCTestCase {
             elapsedTime: 320,
             pausedTime: 0,
             activeTime: 320,
-            isPR: false
+            isPR: false,
+            finishedReason: FinishedReason.goalReached.rawValue
         )
         context.insert(record2)
 
@@ -166,6 +175,7 @@ final class ResultsServiceTests: XCTestCase {
             rounds: 3,
             activeTime: 250,
             before: now,
+            finishedReason: FinishedReason.goalReached.rawValue,
             in: context
         )
         XCTAssertTrue(isThirdPR)
@@ -188,7 +198,8 @@ final class ResultsServiceTests: XCTestCase {
             elapsedTime: 1200,
             pausedTime: 0,
             activeTime: 1200,
-            isPR: true
+            isPR: true,
+            finishedReason: FinishedReason.clockExpired.rawValue
         )
         let recordOld = WorkoutRecord(
             workout: cindy,
@@ -199,7 +210,8 @@ final class ResultsServiceTests: XCTestCase {
             elapsedTime: 1200,
             pausedTime: 0,
             activeTime: 1200,
-            isPR: true
+            isPR: true,
+            finishedReason: FinishedReason.clockExpired.rawValue
         )
         context.insert(recordRecent)
         context.insert(recordOld)

@@ -200,6 +200,89 @@ final class BenchmarkSeedTests: XCTestCase {
         XCTAssertTrue(names.contains("Thrusters"))
     }
 
+    // MARK: - Ordering survives persistence
+
+    /// The existing per-workout tests assert exercise order on freshly built
+    /// objects, where array position is just what the seed assigned. This one
+    /// saves and refetches first, which is where SwiftData's to-many ordering
+    /// stops being guaranteed — Fran must not come back as 9-15-21.
+    func testBlockAndExerciseOrderSurvivesSaveAndRefetch() throws {
+        let context = try makeContext()
+        _ = BenchmarkSeed.fran(in: context)
+        try context.save()
+
+        let refetched = try context.fetch(
+            FetchDescriptor<Workout>(predicate: #Predicate { $0.name == "Fran" })
+        )
+        let fran = try XCTUnwrap(refetched.first)
+
+        let blocks = fran.orderedBlocks
+        XCTAssertEqual(blocks.count, 3)
+        XCTAssertEqual(blocks.map(\.sortIndex), [0, 1, 2])
+
+        // Descending 21-15-9, in that order.
+        let firstLabels = blocks[0].orderedExercises.compactMap(\.displayLabel)
+        XCTAssertEqual(firstLabels, ["21 Thrusters (95 lb)", "21 Pull-ups"])
+        XCTAssertEqual(blocks[1].orderedExercises.compactMap(\.displayLabel),
+                       ["15 Thrusters (95 lb)", "15 Pull-ups"])
+        XCTAssertEqual(blocks[2].orderedExercises.compactMap(\.displayLabel),
+                       ["9 Thrusters (95 lb)", "9 Pull-ups"])
+    }
+
+    /// Order must hold even if the stored relationship array comes back shuffled.
+    func testSimulatorUsesSortIndexNotArrayOrder() throws {
+        let context = try makeContext()
+        let fran = BenchmarkSeed.fran(in: context)
+
+        // Simulate SwiftData handing back the blocks in the wrong order.
+        fran.blocks.reverse()
+
+        let sim = WODSimulator(workout: fran)
+        let labels = sim.liveTasks.compactMap { $0.displayLabel }
+
+        XCTAssertEqual(labels.first, "21 Thrusters (95 lb)",
+                       "Round building must follow sortIndex, not array order")
+        XCTAssertEqual(labels.last, "9 Pull-ups")
+    }
+
+    func testCanonicalPositionsCoverEverySeededExercise() {
+        let positions = BenchmarkSeed.canonicalPositions()
+        XCTAssertEqual(Set(positions.keys),
+                       ["Cindy", "Murph", "Fran", "Angie", "Grace", "Diane", "Helen", "DT"])
+        XCTAssertEqual(positions["Fran"]?["15 Pull-ups"],
+                       BenchmarkSeed.SeedPosition(block: 1, exercise: 1))
+        XCTAssertEqual(positions["Cindy"]?["15 Air Squats"],
+                       BenchmarkSeed.SeedPosition(block: 0, exercise: 2))
+    }
+
+    /// `canonicalLabelOrder` is a hand-written table used by the migration,
+    /// which cannot build model objects. This test is what keeps it honest: if
+    /// a seed prescription changes and the table isn't updated, it fails here.
+    func testCanonicalLabelOrderMatchesTheFactories() throws {
+        let context = try makeContext()
+        let workouts = [
+            BenchmarkSeed.cindy(in: context), BenchmarkSeed.murph(in: context),
+            BenchmarkSeed.fran(in: context), BenchmarkSeed.angie(in: context),
+            BenchmarkSeed.grace(in: context), BenchmarkSeed.diane(in: context),
+            BenchmarkSeed.helen(in: context), BenchmarkSeed.dt(in: context),
+        ]
+
+        for workout in workouts {
+            let actual = workout.orderedBlocks.map { block in
+                block.orderedExercises.compactMap { $0.displayLabel ?? $0.movement?.name }
+            }
+            let declared = try XCTUnwrap(
+                BenchmarkSeed.canonicalLabelOrder[workout.name],
+                "canonicalLabelOrder is missing \(workout.name)"
+            )
+            XCTAssertEqual(actual, declared,
+                           "canonicalLabelOrder is out of step with the \(workout.name) factory")
+        }
+
+        XCTAssertEqual(BenchmarkSeed.canonicalLabelOrder.count, workouts.count,
+                       "canonicalLabelOrder has entries for workouts that no longer exist")
+    }
+
     // MARK: - SeedMigration idempotency
 
     func testSeedMigrationIdempotency() throws {

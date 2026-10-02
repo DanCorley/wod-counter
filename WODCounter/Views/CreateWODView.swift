@@ -27,22 +27,19 @@ struct CreateWODView: View {
         var weight: String
         var distance: String
         var distanceUnit: String
-        var restSeconds: Int
 
         init(id: UUID = UUID(),
              movementName: String,
              reps: Int = 0,
              weight: String = "",
              distance: String = "",
-             distanceUnit: String = "m",
-             restSeconds: Int = 0) {
+             distanceUnit: String = "m") {
             self.id = id
             self.movementName = movementName
             self.reps = reps
             self.weight = weight
             self.distance = distance
             self.distanceUnit = distanceUnit
-            self.restSeconds = restSeconds
         }
     }
 
@@ -152,22 +149,21 @@ struct CreateWODView: View {
         )
         var exercises: [Exercise] = []
         exercises.reserveCapacity(drafts.count)
-        for draft in drafts {
+        for (index, draft) in drafts.enumerated() {
             let movement = movement(named: draft.movementName, in: context)
             let reps = draft.reps > 0 ? draft.reps : nil
             let weight = draft.weight.trimmed.isEmpty ? nil : draft.weight.trimmed
             let distance = composeDistance(draft.distance, unit: draft.distanceUnit)
             let unit = (distance != nil && !draft.distanceUnit.trimmed.isEmpty)
                 ? draft.distanceUnit.trimmed : nil
-            let rest = draft.restSeconds > 0 ? draft.restSeconds : nil
             let exercise = Exercise(
                 movement: movement,
                 reps: reps,
                 weight: weight,
                 distance: distance,
                 distanceUnit: unit,
-                restSeconds: rest,
-                displayLabel: displayLabel(for: draft)
+                displayLabel: displayLabel(for: draft),
+                sortIndex: index
             )
             context.insert(exercise)
             exercises.append(exercise)
@@ -296,7 +292,6 @@ struct CreateWODView: View {
                             Text(unit).tag(unit)
                         }
                     }
-                    TextField("Rest After (s)", value: binding.restSeconds, format: .number)
                 } header: {
                     Text(draft.movementName)
                 } footer: {
@@ -386,6 +381,11 @@ struct CreateWODView: View {
             try modelContext.save()
             dismiss()
         } catch {
+            // `makeWorkout` already inserted Movements and Exercises into the
+            // shared main context. Without a rollback they stay pending, and the
+            // next unrelated save anywhere in the app would commit the workout
+            // the user was just told could not be saved.
+            modelContext.rollback()
             errorMessage = error.localizedDescription
         }
     }

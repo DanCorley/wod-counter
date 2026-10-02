@@ -6,6 +6,19 @@
 >
 > **Status:** Ready to build. All decisions below are ratified.
 >
+> **Design evolution (2026-10, correctness pass):** four spec'd details no longer match the
+> code, deliberately. (1) **Elapsed time** is derived from a real clock in `WorkoutTimerService`
+> rather than accumulated per tick, so a locked screen or suspended app no longer loses time;
+> `WODSimulator.advanceTime(dt:active:)` became `updateTime(active:wall:)`. (2) **Block and
+> exercise order** is stored in an explicit `sortIndex` — SwiftData does not guarantee to-many
+> ordering, which could reorder Fran's 21-15-9. (3) **PR eligibility** now requires a complete
+> effort (`FinishedReason.goalReached` for top-time, `.clockExpired` for for-time); an abandoned
+> attempt is recorded but never starred. (4) **Removed as dead UI:** the iCloud sync toggle
+> (§7 / §6 `SyncService` are unimplemented — note CloudKit cannot support the existing
+> `@Attribute(.unique)` constraints, so sync needs its own design) and per-exercise
+> `Exercise.restSeconds` (§3); rest between rounds is served by `RoundBlock.restAfterBlock`,
+> which does work and covers the Barbara case in §8.
+>
 > **Design evolution (2026-09, timer rework, commit `5e2a197`):** the session engine was
 > reworked from a *sequential per-rep cycling counter* to a **free-form task tracker**
 > (every set is a task; any-order rep logging; per-round sets for repeats; AMRAP rounds

@@ -44,24 +44,49 @@ struct WODSimulator: Sendable {
         var isComplete: Bool { !tasks.isEmpty && tasks.allSatisfy(\.isComplete) }
 
         mutating func regenerateTasks(with workout: Workout) {
-            tasks = WODSimulator.freshTasks(for: workout.blocks[blockIndex], blockIndex: blockIndex)
+            // `workout` is a live model object; its blocks can be edited or
+            // deleted while a session holds this round, so never subscript blind.
+            let blocks = workout.orderedBlocks
+            guard blocks.indices.contains(blockIndex) else { return }
+            tasks = WODSimulator.freshTasks(for: blocks[blockIndex], blockIndex: blockIndex)
         }
     }
 
     let workout: Workout
+
+    /// Total reps prescribed by the workout as first built. Meaningful for
+    /// finite (top-time) workouts; AMRAP rounds regenerate, so for those this is
+    /// only the first wave and completion is decided by the clock instead.
+    let initialQuota: Int
 
     // MARK: - Progress State
     private var rounds: [Round]
     private(set) var phase: Phase = .idle
     private(set) var roundsCompleted: Int = 0
     private(set) var totalRepsCompleted: Int = 0
+    /// Total time since the session started, including paused stretches.
     private(set) var wallClock: TimeInterval = 0
-    private(set) var pausedAccumulated: TimeInterval = 0
-    private(set) var restDeadline: TimeInterval? = nil
+    /// Time the athlete was actually working: wall clock minus paused stretches.
+    /// Both values are supplied by the owning service from a real clock — the
+    /// simulator never accumulates time itself, so a missed or late tick cannot
+    /// cost the session any elapsed time.
+    private(set) var activeElapsed: TimeInterval = 0
+    /// Rest expiry expressed in *active* time, so pausing cannot consume a rest.
+    private(set) var restEndsAtActive: TimeInterval? = nil
+
+    var pausedAccumulated: TimeInterval { max(0, wallClock - activeElapsed) }
+
+    /// Seconds left in the current rest, if resting.
+    var restRemaining: TimeInterval? {
+        guard let endsAt = restEndsAtActive else { return nil }
+        return max(0, endsAt - activeElapsed)
+    }
 
     init(workout: Workout) {
         self.workout = workout
-        self.rounds = Self.buildRounds(for: workout)
+        let built = Self.buildRounds(for: workout)
+        self.rounds = built
+        self.initialQuota = built.reduce(0) { $0 + $1.tasks.reduce(0) { $0 + $1.quota } }
     }
 
     // MARK: - Derived Properties
@@ -80,7 +105,7 @@ struct WODSimulator: Sendable {
     }
 
     var resultActiveTime: TimeInterval {
-        max(0, wallClock - pausedAccumulated)
+        max(0, activeElapsed)
     }
 
     var forTimeMinutes: Int? {
@@ -105,6 +130,7 @@ struct WODSimulator: Sendable {
             totalRemaining: totalRemaining,
             wallClock: wallClock,
             activeElapsed: resultActiveTime,
+            restRemaining: restRemaining,
             isPaused: phase == .paused,
             isFinished: phase == .finished
         )
@@ -115,7 +141,7 @@ struct WODSimulator: Sendable {
     private static func buildRounds(for workout: Workout) -> [Round] {
         var result: [Round] = []
         var number = 0
-        for (blockIndex, block) in workout.blocks.enumerated() {
+        for (blockIndex, block) in workout.orderedBlocks.enumerated() {
             let repeats = max(0, block.repeatTimes)
             if repeats == 0 {
                 number += 1
@@ -143,7 +169,7 @@ struct WODSimulator: Sendable {
     }
 
     fileprivate static func freshTasks(for block: RoundBlock, blockIndex: Int) -> [Task] {
-        block.exercises.map { exercise in
+        block.orderedExercises.map { exercise in
             Task(
                 id: UUID(),
                 blockIndex: blockIndex,
@@ -168,7 +194,7 @@ struct WODSimulator: Sendable {
 
     mutating func resume() {
         guard phase == .paused else { return }
-        phase = (restDeadline != nil) ? .resting : .running
+        phase = (restEndsAtActive != nil) ? .resting : .running
     }
 
     /// Logs completed reps against a specific pending task. The athlete may
@@ -176,7 +202,7 @@ struct WODSimulator: Sendable {
     /// task's remaining quota.
     @discardableResult
     mutating func completeReps(taskID: UUID, count: Int) -> TimerEvent {
-        guard phase == .running, restDeadline == nil else { return .none }
+        guard phase == .running, restEndsAtActive == nil else { return .none }
         guard let (roundIndex, taskIndex) = locate(taskID) else { return .none }
         let added = min(max(0, count), rounds[roundIndex].tasks[taskIndex].remaining)
         guard added > 0 else { return .none }
@@ -189,14 +215,14 @@ struct WODSimulator: Sendable {
         guard phase == .running else { return .none }
         let rest = duration ?? Double(currentBlock?.restAfterBlock ?? 0)
         guard rest > 0 else { return .none }
-        restDeadline = wallClock + rest
+        restEndsAtActive = activeElapsed + rest
         phase = .resting
         return .none
     }
 
     mutating func endRest() -> TimerEvent {
         guard phase == .resting else { return .none }
-        restDeadline = nil
+        restEndsAtActive = nil
         phase = .running
         return .none
     }
@@ -206,24 +232,25 @@ struct WODSimulator: Sendable {
         return .finished(.manual)
     }
 
-    mutating func advanceTime(_ dt: TimeInterval, active: Bool) {
+    /// Sets the session's elapsed time from the owning service's real clock and
+    /// re-evaluates anything time-dependent. Idempotent: calling it twice with
+    /// the same values changes nothing, so refresh frequency is free to vary.
+    mutating func updateTime(active: TimeInterval, wall: TimeInterval) {
         guard phase != .idle && phase != .finished else { return }
 
-        if active && phase == .running {
-            wallClock += dt
-            if workout.mode == .forTime, isClockExpired {
-                phase = .finished
-            }
-        } else if active && phase == .resting {
-            wallClock += dt
-            if let deadline = restDeadline, wallClock >= deadline {
-                restDeadline = nil
-                phase = .running
-            }
-        } else {
-            // Paused or non-active time
-            pausedAccumulated += dt
-            wallClock += dt
+        activeElapsed = max(activeElapsed, active)
+        wallClock = max(wallClock, wall)
+
+        // Rest expires on active time, so a pause mid-rest preserves it.
+        if phase == .resting, let endsAt = restEndsAtActive, activeElapsed >= endsAt {
+            restEndsAtActive = nil
+            phase = .running
+        }
+
+        // The cap applies in every live phase — a rest must not outrun it.
+        if workout.mode == .forTime, isClockExpired {
+            restEndsAtActive = nil
+            phase = .finished
         }
     }
 
@@ -232,8 +259,8 @@ struct WODSimulator: Sendable {
         roundsCompleted = 0
         totalRepsCompleted = 0
         wallClock = 0
-        pausedAccumulated = 0
-        restDeadline = nil
+        activeElapsed = 0
+        restEndsAtActive = nil
         rounds = Self.buildRounds(for: workout)
     }
 
@@ -241,8 +268,9 @@ struct WODSimulator: Sendable {
 
     private var currentBlock: RoundBlock? {
         guard let firstIncomplete = rounds.first(where: { !$0.isComplete }) else { return nil }
-        return workout.blocks.indices.contains(firstIncomplete.blockIndex)
-            ? workout.blocks[firstIncomplete.blockIndex]
+        let blocks = workout.orderedBlocks
+        return blocks.indices.contains(firstIncomplete.blockIndex)
+            ? blocks[firstIncomplete.blockIndex]
             : nil
     }
 
@@ -276,7 +304,7 @@ struct WODSimulator: Sendable {
 
         // Rest after a completed round, if the block defines one.
         if result != .none, let rest = currentBlock?.restAfterBlock, rest > 0 {
-            restDeadline = wallClock + Double(rest)
+            restEndsAtActive = activeElapsed + Double(rest)
             phase = .resting
         }
 

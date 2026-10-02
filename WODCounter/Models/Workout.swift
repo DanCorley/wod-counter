@@ -28,6 +28,13 @@ import SwiftData
         self.updatedAt = updatedAt
     }
 
+    /// Blocks in their prescribed order. Always use this rather than `blocks`
+    /// directly: round numbering and the scheme display both depend on order,
+    /// and SwiftData does not guarantee it for a to-many relationship.
+    var orderedBlocks: [RoundBlock] {
+        blocks.sorted { $0.sortIndex < $1.sortIndex }
+    }
+
     // MARK: - Category Helpers
     var isGirlBenchmark: Bool {
         category == "Girl"

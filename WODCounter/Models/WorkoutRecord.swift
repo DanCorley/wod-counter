@@ -13,11 +13,63 @@ import SwiftData
     var activeTime: TimeInterval
     var isPR: Bool
     var notes: String?
+    /// Raw value of `FinishedReason` — how the session ended. Optional so that
+    /// records written before this field existed migrate cleanly; those are
+    /// treated as ineligible for PRs, since their completeness is unknown.
+    var finishedReason: String?
+    /// Total reps the workout prescribed, for judging partial attempts.
+    var repsQuota: Int?
+
+    /// Whether the athlete finished the prescribed work. A top-time PR requires
+    /// this; otherwise a 5-second bail-out would record an unbeatable best.
+    var didCompleteWork: Bool {
+        finishedReason == FinishedReason.goalReached.rawValue
+    }
+
+    /// Whether this attempt may be ranked against others — as a PR, as a
+    /// "best", in a delta, or on the progression chart.
+    ///
+    /// The single definition of that rule. It previously existed only inside
+    /// the PR check, so the history screen's "best" ranked abandoned attempts
+    /// and happily showed a 5-second Fran as the time to beat.
+    ///
+    /// A time is comparable only if the prescribed work was completed, and a
+    /// round count only if the clock ran its full course; a manual stop is
+    /// neither.
+    var isRankable: Bool {
+        switch kind {
+        case "time":   return finishedReason == FinishedReason.goalReached.rawValue
+        case "rounds": return finishedReason == FinishedReason.clockExpired.rawValue
+        default:       return false
+        }
+    }
+
+    /// Whether the athlete positively stopped this attempt early.
+    ///
+    /// Deliberately not `!isRankable`: a record written before `finishedReason`
+    /// existed has unknown provenance, and labelling it "Incomplete" would be
+    /// asserting something we do not know. Only an explicit manual stop counts.
+    var wasStoppedEarly: Bool {
+        finishedReason == FinishedReason.manual.rawValue
+    }
+
+    /// "2 of 90 reps", when the quota is known.
+    var completionSummary: String? {
+        guard let repsQuota, repsQuota > 0 else { return nil }
+        return "\(totalReps) of \(repsQuota) reps"
+    }
+
+    /// Fraction of prescribed reps completed, when the quota is known.
+    var completionFraction: Double? {
+        guard let repsQuota, repsQuota > 0 else { return nil }
+        return min(1, Double(totalReps) / Double(repsQuota))
+    }
 
     init(id: UUID = UUID(), workout: Workout? = nil, date: Date = Date(),
          kind: String, roundsCompleted: Int, totalReps: Int,
          elapsedTime: TimeInterval, pausedTime: TimeInterval, activeTime: TimeInterval,
-         isPR: Bool, notes: String? = nil) {
+         isPR: Bool, notes: String? = nil,
+         finishedReason: String? = nil, repsQuota: Int? = nil) {
         self.id = id
         self.workout = workout
         self.date = date
@@ -29,5 +81,7 @@ import SwiftData
         self.activeTime = activeTime
         self.isPR = isPR
         self.notes = notes
+        self.finishedReason = finishedReason
+        self.repsQuota = repsQuota
     }
 }

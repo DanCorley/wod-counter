@@ -10,6 +10,7 @@ struct SessionSnapshot: Equatable, Sendable {
     var totalRemaining: Int
     var wallClock: TimeInterval
     var activeElapsed: TimeInterval
+    var restRemaining: TimeInterval?
     var isPaused: Bool
     var isFinished: Bool
 
@@ -29,6 +30,7 @@ extension SessionSnapshot {
             totalRemaining: 0,
             wallClock: 0,
             activeElapsed: 0,
+            restRemaining: nil,
             isPaused: false,
             isFinished: false
         )
