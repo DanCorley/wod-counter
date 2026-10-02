@@ -4,6 +4,11 @@ struct WorkoutSchemeView: View {
     let workout: Workout
     var isCompact: Bool = false
 
+    /// Every exercise in the workout, in prescribed order.
+    private var orderedExercises: [Exercise] {
+        workout.orderedBlocks.flatMap(\.orderedExercises)
+    }
+
     var body: some View {
         if workout.blocks.isEmpty {
             Text("No exercises specified.")
@@ -17,13 +22,13 @@ struct WorkoutSchemeView: View {
 
     private var compactView: some View {
         VStack(alignment: .leading, spacing: 2) {
-            ForEach(workout.blocks.flatMap { $0.exercises }.prefix(3)) { exercise in
+            ForEach(orderedExercises.prefix(3)) { exercise in
                 Text(exercise.displayLabel ?? exercise.movement?.name ?? "Exercise")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
-            if workout.blocks.flatMap({ $0.exercises }).count > 3 {
+            if orderedExercises.count > 3 {
                 Text("+ more")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
@@ -32,7 +37,7 @@ struct WorkoutSchemeView: View {
     }
 
     private var expandedView: some View {
-        ForEach(Array(workout.blocks.enumerated()), id: \.offset) { index, block in
+        ForEach(Array(workout.orderedBlocks.enumerated()), id: \.offset) { index, block in
             VStack(alignment: .leading, spacing: 6) {
                 HStack {
                     Text(workout.blockHeader(for: block, index: index))
@@ -46,7 +51,7 @@ struct WorkoutSchemeView: View {
                     }
                 }
 
-                ForEach(block.exercises) { exercise in
+                ForEach(block.orderedExercises) { exercise in
                     HStack(spacing: 8) {
                         Image(systemName: "circle.fill")
                             .font(.system(size: 6))

@@ -102,7 +102,7 @@ struct CreateWODViewTests {
     @Test func makeWorkoutBuildsAndInsertsTopTimeWorkout() throws {
         let context = makeContext()
         let drafts = [
-            Draft(movementName: "Thrusters", reps: 21, weight: "95 lb", restSeconds: 30),
+            Draft(movementName: "Thrusters", reps: 21, weight: "95 lb"),
             Draft(movementName: "Run", distance: "400", distanceUnit: "m"),
             Draft(movementName: "Pull-up", reps: 100),
         ]
@@ -146,7 +146,6 @@ struct CreateWODViewTests {
         #expect(thrusters.displayLabel == "21 Thrusters (95 lb)")
         #expect(thrusters.reps == 21)
         #expect(thrusters.weight == "95 lb")
-        #expect(thrusters.restSeconds == 30)
 
         let run = try #require(byName["Run"])
         #expect(run.displayLabel == "400 m Run")

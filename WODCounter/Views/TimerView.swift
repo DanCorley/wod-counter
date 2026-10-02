@@ -8,6 +8,8 @@ struct TimerView: View {
     @State private var service: WorkoutTimerService?
     @State private var selectedTaskID: UUID?
     @State private var isConfirmingFinish = false
+    @State private var isConfirmingClose = false
+    @State private var isShowingCompletion = false
 
     private var snapshot: SessionSnapshot {
         service?.snapshot ?? .idle
@@ -59,10 +61,12 @@ struct TimerView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    if isIdle {
-                        Button("Cancel") { dismiss() }
+                    if isIdle || snapshot.isFinished {
+                        // Nothing in flight: idle has no session yet, and a
+                        // finished session has already saved its record.
+                        Button(isIdle ? "Cancel" : "Close") { dismiss() }
                     } else {
-                        Button("Close") { dismiss() }
+                        Button("Close") { isConfirmingClose = true }
                     }
                 }
             }
@@ -82,10 +86,30 @@ struct TimerView: View {
             }
             Button("Cancel", role: .cancel) {}
         }
-        .sheet(isPresented: Binding(
-            get: { snapshot.isFinished },
-            set: { _ in }
-        )) {
+        .confirmationDialog(
+            "Leave this workout?",
+            isPresented: $isConfirmingClose,
+            titleVisibility: .visible
+        ) {
+            Button("Save & Close") {
+                service?.finish()
+                dismiss()
+            }
+            Button("Discard Workout", role: .destructive) {
+                service?.reset()
+                dismiss()
+            }
+            Button("Keep Going", role: .cancel) {}
+        } message: {
+            Text("Save your progress so far, or discard this session without recording it.")
+        }
+        // Backed by real state rather than derived from the snapshot: a
+        // get-only binding meant a swipe-dismiss could not take effect, so the
+        // sheet either sprang back or wedged with every control disabled.
+        .onChange(of: snapshot.isFinished) { _, isFinished in
+            if isFinished { isShowingCompletion = true }
+        }
+        .sheet(isPresented: $isShowingCompletion) {
             WorkoutCompletionSheet(workout: workout, snapshot: snapshot) {
                 dismiss()
             }
@@ -256,8 +280,14 @@ struct TimerView: View {
     private var restBanner: some View {
         HStack {
             Image(systemName: "pause.circle.fill")
-            Text("Resting...")
-                .bold()
+            if let remaining = snapshot.restRemaining {
+                Text("Resting · \(Format.duration(remaining.rounded(.up)))")
+                    .bold()
+                    .monospacedDigit()
+            } else {
+                Text("Resting...")
+                    .bold()
+            }
             Spacer()
             Button("Skip Rest") {
                 _ = service?.endRest()

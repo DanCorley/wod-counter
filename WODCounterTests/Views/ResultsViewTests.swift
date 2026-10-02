@@ -6,6 +6,39 @@ import Foundation
 @MainActor
 struct ResultsViewTests {
 
+    // MARK: - Stored Window Preference
+
+    /// The defect this guards: Settings wrote key "defaultWindow" with tags
+    /// "7d"/"30d"/"90d"/"all" while History read "defaultResultsWindow" and
+    /// parsed cases "7d"/"30d"/"90d"/"All" — so the preference did nothing, and
+    /// even with a matching key "all" would have fallen back to 30 days. Both
+    /// screens now tag with `rawValue` and share `ResultsWindow.defaultsKey`.
+    @Test func everyWindowRoundTripsThroughItsStoredValue() {
+        for window in ResultsWindow.allCases {
+            #expect(ResultsWindow(stored: window.rawValue) == window,
+                    "\(window.rawValue) must survive a round trip through storage")
+        }
+    }
+
+    @Test func allTimeIsReachableFromItsStoredValue() {
+        // The specific case that used to break: a lowercase "all" tag.
+        #expect(ResultsWindow(stored: "All") == .allTime)
+        #expect(ResultsWindow(stored: "all") == .thirtyDays, "unknown values fall back")
+    }
+
+    @Test func unknownStoredValueFallsBackToTheDefault() {
+        #expect(ResultsWindow(stored: "") == ResultsWindow.fallback)
+        #expect(ResultsWindow(stored: "nonsense") == ResultsWindow.fallback)
+        #expect(ResultsWindow.fallback == .thirtyDays)
+    }
+
+    @Test func everyWindowHasADistinctLabelAndTag() {
+        let tags = Set(ResultsWindow.allCases.map(\.rawValue))
+        let labels = Set(ResultsWindow.allCases.map(\.label))
+        #expect(tags.count == ResultsWindow.allCases.count)
+        #expect(labels.count == ResultsWindow.allCases.count)
+    }
+
     // MARK: - Helpers
 
     /// Inserts a WorkoutRecord for the given workout with the given parameters at the specified offset from now.

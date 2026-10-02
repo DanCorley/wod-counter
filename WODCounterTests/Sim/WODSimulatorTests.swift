@@ -68,7 +68,7 @@ final class WODSimulatorTests: XCTestCase {
         XCTAssertEqual(sim.totalRemaining, 30)
 
         // Advance active time past the 20-minute cap (1200 seconds).
-        sim.advanceTime(1201, active: true)
+        sim.updateTime(active: 1201, wall: 1201)
         XCTAssertTrue(sim.isClockExpired)
         XCTAssertEqual(sim.phase, .finished)
         XCTAssertEqual(sim.snapshot.isFinished, true)
@@ -228,23 +228,101 @@ final class WODSimulatorTests: XCTestCase {
         var sim = WODSimulator(workout: cindy)
 
         sim.start()
-        sim.advanceTime(20, active: true)
+        sim.updateTime(active: 20, wall: 20)
         XCTAssertEqual(sim.resultActiveTime, 20)
         XCTAssertEqual(sim.wallClock, 20)
 
         sim.pause()
         XCTAssertEqual(sim.phase, .paused)
-        sim.advanceTime(15, active: false)
+        // 15 seconds of wall time pass, none of it active.
+        sim.updateTime(active: 20, wall: 35)
 
         XCTAssertEqual(sim.resultActiveTime, 20)
         XCTAssertEqual(sim.wallClock, 35)
+        XCTAssertEqual(sim.pausedAccumulated, 15)
 
         sim.resume()
         XCTAssertEqual(sim.phase, .running)
-        sim.advanceTime(10, active: true)
+        sim.updateTime(active: 30, wall: 45)
 
         XCTAssertEqual(sim.resultActiveTime, 30)
         XCTAssertEqual(sim.wallClock, 45)
+        XCTAssertEqual(sim.pausedAccumulated, 15)
+    }
+
+    // MARK: - Rest Handling
+
+    @MainActor
+    func testRestExpiresOnActiveTimeSoPauseCannotConsumeIt() {
+        let workout = Workout(name: "Spaced", category: "Custom", mode: .topTime)
+        let block = RoundBlock(repeatTimes: 2, restAfterBlock: 60)
+        let movement = Movement(name: "Air Squat")
+        block.exercises = [Exercise(movement: movement, reps: 1,
+                                    displayLabel: "1 Air Squat", sortIndex: 0)]
+        workout.blocks = [block]
+
+        var sim = WODSimulator(workout: workout)
+        sim.start()
+        sim.updateTime(active: 10, wall: 10)
+
+        // Finish round one; the block's rest kicks in.
+        _ = sim.completeReps(taskID: sim.liveTasks[0].id, count: 1)
+        XCTAssertEqual(sim.phase, .resting)
+        XCTAssertEqual(sim.restRemaining, 60)
+
+        // Pause for 5 minutes of wall time. Rest is measured in active time, so
+        // none of it should be consumed.
+        sim.pause()
+        sim.updateTime(active: 10, wall: 310)
+        XCTAssertEqual(sim.restRemaining, 60)
+
+        sim.resume()
+        XCTAssertEqual(sim.phase, .resting, "Resuming mid-rest should return to resting")
+        XCTAssertEqual(sim.restRemaining, 60, "A pause must not eat into the rest")
+
+        // 60 seconds of actual work time later, rest is done.
+        sim.updateTime(active: 70, wall: 370)
+        XCTAssertEqual(sim.phase, .running)
+        XCTAssertNil(sim.restRemaining)
+    }
+
+    @MainActor
+    func testForTimeCapExpiresEvenWhileResting() {
+        let workout = Workout(name: "Capped", category: "Custom",
+                              mode: .forTime, forTimeMinutes: 1)
+        let block = RoundBlock(repeatTimes: 0, restAfterBlock: 600)
+        let movement = Movement(name: "Air Squat")
+        block.exercises = [Exercise(movement: movement, reps: 1,
+                                    displayLabel: "1 Air Squat", sortIndex: 0)]
+        workout.blocks = [block]
+
+        var sim = WODSimulator(workout: workout)
+        sim.start()
+
+        // Complete the looping round, triggering a 10-minute rest inside a
+        // 1-minute cap.
+        _ = sim.completeReps(taskID: sim.liveTasks[0].id, count: 1)
+        XCTAssertEqual(sim.phase, .resting)
+
+        // The cap must win, even though the rest has not expired.
+        sim.updateTime(active: 61, wall: 61)
+        XCTAssertEqual(sim.phase, .finished, "A rest must not outrun the time cap")
+    }
+
+    @MainActor
+    func testUpdateTimeIsIdempotentAndMonotonic() {
+        let cindy = BenchmarkSeed.cindy(in: context)
+        var sim = WODSimulator(workout: cindy)
+
+        sim.start()
+        sim.updateTime(active: 30, wall: 30)
+        sim.updateTime(active: 30, wall: 30)
+        XCTAssertEqual(sim.resultActiveTime, 30)
+
+        // A stale or out-of-order refresh must never rewind the clock.
+        sim.updateTime(active: 5, wall: 5)
+        XCTAssertEqual(sim.resultActiveTime, 30)
+        XCTAssertEqual(sim.wallClock, 30)
     }
 
     // MARK: - Manual Finish

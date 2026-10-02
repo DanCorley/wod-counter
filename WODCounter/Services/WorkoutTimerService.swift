@@ -18,6 +18,25 @@ final class WorkoutTimerService: Identifiable {
     private(set) var snapshot: SessionSnapshot
     private var ticker: Task<Void, Never>?
 
+    /// When the session started, per the injected clock. Elapsed time is always
+    /// derived from this against the current clock reading — never accumulated
+    /// per tick — so a late, missed, or suspended tick costs nothing but a
+    /// momentarily stale label.
+    private var startedAt: Date?
+    /// When the current pause began, if paused.
+    private var pausedAt: Date?
+    /// Total time spent paused across all completed pauses.
+    private var pausedTotal: TimeInterval = 0
+    /// Set once the finish record has been handed off, so it can only happen once.
+    private var didReportFinish = false
+    /// Whether this session is currently holding the screen awake.
+    ///
+    /// `nonisolated(unsafe)` because `deinit` is nonisolated and needs to read
+    /// it to decide whether to balance the hold. That is safe here: a
+    /// deallocating object has no other live references, so nothing can race
+    /// the read. Every other access is on the main actor.
+    private nonisolated(unsafe) var isHoldingScreen = false
+
     init(
         id: UUID = UUID(),
         workout: Workout,
@@ -33,25 +52,79 @@ final class WorkoutTimerService: Identifiable {
         self.snapshot = sim.snapshot
     }
 
+    deinit {
+        // A session can be torn down without any of the normal exit paths
+        // running — a navigation pop, say. Releasing here is what guarantees
+        // the hold is always balanced. `deinit` is not guaranteed to run on the
+        // main actor, hence the hop; nothing captures `self`.
+        if isHoldingScreen {
+            Task { @MainActor in ScreenSleep.release() }
+        }
+    }
+
+    // MARK: - Screen
+
+    /// Holds or releases the screen-awake lock, idempotently — so repeated
+    /// calls from overlapping lifecycle events cannot unbalance the count.
+    private func holdScreen(_ wanted: Bool) {
+        guard wanted != isHoldingScreen else { return }
+        isHoldingScreen = wanted
+        if wanted {
+            ScreenSleep.hold()
+        } else {
+            ScreenSleep.release()
+        }
+    }
+
+    // MARK: - Derived Time
+
+    /// Wall time since start, including paused stretches.
+    private var wallElapsed: TimeInterval {
+        guard let startedAt else { return 0 }
+        return max(0, clock().timeIntervalSince(startedAt))
+    }
+
+    /// Paused time so far, including an in-progress pause.
+    private var pausedElapsed: TimeInterval {
+        guard let pausedAt else { return pausedTotal }
+        return pausedTotal + max(0, clock().timeIntervalSince(pausedAt))
+    }
+
     // MARK: - Controls
+
     func start() {
-        guard simulator.phase != .finished else { return }
+        guard simulator.phase == .idle else { return }
+        startedAt = clock()
+        pausedAt = nil
+        pausedTotal = 0
         simulator.start()
-        publish()
+        holdScreen(true)
+        refresh()
         scheduleTicker()
     }
 
     func pause() {
         guard simulator.phase == .running || simulator.phase == .resting else { return }
+        // Bank the time worked up to this instant before the clock freezes,
+        // so pausing between ticks cannot shave off the partial second.
+        simulator.updateTime(active: wallElapsed - pausedElapsed, wall: wallElapsed)
+        pausedAt = clock()
         simulator.pause()
         stopTicker()
+        // Paused means the athlete has stepped away; let the screen sleep.
+        holdScreen(false)
         publish()
     }
 
     func resume() {
         guard simulator.phase == .paused else { return }
+        if let pausedAt {
+            pausedTotal += max(0, clock().timeIntervalSince(pausedAt))
+        }
+        pausedAt = nil
         simulator.resume()
-        publish()
+        holdScreen(true)
+        refresh()
         scheduleTicker()
     }
 
@@ -59,68 +132,97 @@ final class WorkoutTimerService: Identifiable {
     @discardableResult
     func logReps(taskID: UUID, count: Int) -> TimerEvent {
         let ev = simulator.completeReps(taskID: taskID, count: count)
-        publish()
-        if case .finished = ev {
-            handleFinishedSession()
+        refresh()
+        if case .finished(let reason) = ev {
+            handleFinishedSession(reason: reason)
         }
         return ev
     }
 
+    @discardableResult
     func startRest(duration: TimeInterval? = nil) -> TimerEvent {
         let ev = simulator.startRest(duration: duration)
-        publish()
+        refresh()
         return ev
     }
 
+    @discardableResult
     func endRest() -> TimerEvent {
         let ev = simulator.endRest()
-        publish()
+        refresh()
         return ev
     }
 
     func finish() {
-        if simulator.phase == .running || simulator.phase == .resting {
-            stopTicker()
+        guard simulator.phase != .finished else { return }
+        stopTicker()
+
+        // Settle the clock first so the recorded time is current rather than
+        // whatever the last tick happened to leave behind.
+        if simulator.phase != .idle {
+            simulator.updateTime(active: wallElapsed - pausedElapsed, wall: wallElapsed)
         }
-        _ = simulator.finish()
+
+        // Settling may itself have tripped the time cap, which is a different
+        // outcome from the athlete choosing to stop.
+        let reason: FinishedReason = simulator.phase == .finished ? .clockExpired : .manual
+        if simulator.phase != .finished {
+            _ = simulator.finish()
+        }
+
         publish()
-        handleFinishedSession()
+        handleFinishedSession(reason: reason)
     }
 
     func reset() {
         stopTicker()
+        holdScreen(false)
         simulator.reset()
+        startedAt = nil
+        pausedAt = nil
+        pausedTotal = 0
+        didReportFinish = false
         publish()
     }
 
-    func advanceTimeStep(_ dt: TimeInterval, active: Bool) {
-        let wasFinished = simulator.phase == .finished
-        simulator.advanceTime(dt, active: active)
-        if simulator.phase == .finished && !wasFinished {
-            handleFinishedSession()
+    /// Recomputes elapsed time from the clock and republishes. Safe and cheap to
+    /// call at any time — on a tick, on returning to the foreground, or on a
+    /// view appearing. Idempotent.
+    func refresh() {
+        guard simulator.phase != .idle, simulator.phase != .finished else {
+            publish()
+            return
         }
+        // The guard above means the session was live coming in, so a .finished
+        // phase here is newly reached — only the time cap can do that.
+        simulator.updateTime(active: wallElapsed - pausedElapsed, wall: wallElapsed)
         publish()
+        if simulator.phase == .finished {
+            stopTicker()
+            handleFinishedSession(reason: .clockExpired)
+        }
     }
 
     // MARK: - Internal Session Handling
-    private func handleFinishedSession() {
+
+    private func handleFinishedSession(reason: FinishedReason) {
+        guard !didReportFinish else { return }
+        didReportFinish = true
         stopTicker()
-        let activeTime = simulator.resultActiveTime
-        let totalElapsed = simulator.wallClock
-        let pausedTime = totalElapsed - activeTime
-        let kind = workout.mode == .forTime ? "rounds" : "time"
-        let currentDate = clock()
+        holdScreen(false)
 
         let record = WorkoutRecord(
             workout: workout,
-            date: currentDate,
-            kind: kind,
+            date: clock(),
+            kind: workout.mode == .forTime ? "rounds" : "time",
             roundsCompleted: simulator.roundsCompleted,
             totalReps: simulator.totalRepsCompleted,
-            elapsedTime: totalElapsed,
-            pausedTime: pausedTime,
-            activeTime: activeTime,
-            isPR: false
+            elapsedTime: simulator.wallClock,
+            pausedTime: simulator.pausedAccumulated,
+            activeTime: simulator.resultActiveTime,
+            isPR: false,
+            finishedReason: reason.rawValue,
+            repsQuota: simulator.initialQuota
         )
         hook.onFinish(record)
     }
@@ -135,7 +237,7 @@ final class WorkoutTimerService: Identifiable {
                 if phase == .paused || phase == .finished || phase == .idle {
                     return
                 }
-                self.advanceTimeStep(1, active: true)
+                self.refresh()
             }
         }
     }

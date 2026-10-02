@@ -12,6 +12,19 @@ enum ResultsWindow: String, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
+    /// The one `UserDefaults` key for the saved default window. Settings and
+    /// History both go through this, and both tag their pickers with
+    /// `rawValue` — previously each spelled its own key and its own tag
+    /// strings, so the Settings picker silently controlled nothing.
+    static let defaultsKey = "defaultResultsWindow"
+
+    static let fallback: ResultsWindow = .thirtyDays
+
+    /// Resolves a stored raw value, tolerating anything unrecognised.
+    init(stored: String) {
+        self = ResultsWindow(rawValue: stored) ?? Self.fallback
+    }
+
     var dateInterval: DateInterval? {
         let now = Date()
         switch self {
@@ -37,25 +50,32 @@ enum ResultsWindow: String, CaseIterable, Identifiable {
 struct ResultsView: View {
     @Environment(\.modelContext) private var context
     @Query(sort: \Workout.name) private var workouts: [Workout]
-    @AppStorage("defaultResultsWindow") private var storedWindow: String = ResultsWindow.thirtyDays.rawValue
+    @AppStorage(ResultsWindow.defaultsKey) private var storedWindow: String = ResultsWindow.fallback.rawValue
 
     private var selectedWindow: ResultsWindow {
-        ResultsWindow(rawValue: storedWindow) ?? .thirtyDays
+        ResultsWindow(stored: storedWindow)
     }
 
     private var service: ResultsService {
         ResultsService(context: context)
     }
 
-    private var windowSummary: WindowSummary {
-        service.summary(window: selectedWindow.dateInterval)
+    /// Every record in the window, fetched once and grouped by workout.
+    ///
+    /// Previously each row re-fetched the whole `WorkoutRecord` table through a
+    /// computed property, and several properties per row each triggered another
+    /// one — so a scroll cost hundreds of full-table fetches. One fetch here,
+    /// handed down to the rows, removes that entirely.
+    private var recordsByWorkout: [PersistentIdentifier: [WorkoutRecord]] {
+        Dictionary(
+            grouping: service.history(window: selectedWindow.dateInterval)
+                .filter { $0.workout != nil },
+            by: { $0.workout!.persistentModelID }
+        )
     }
 
-    /// Workouts that have at least one record in the selected window.
-    private var workoutsWithHistory: [Workout] {
-        workouts.filter { workout in
-            !service.history(for: workout, window: selectedWindow.dateInterval).isEmpty
-        }
+    private var windowSummary: WindowSummary {
+        service.summary(window: selectedWindow.dateInterval)
     }
 
     var body: some View {
@@ -82,21 +102,23 @@ struct ResultsView: View {
             }
 
             // Per-WOD Bests
-            if workoutsWithHistory.isEmpty {
+            let grouped = recordsByWorkout
+            let withHistory = workouts.filter { grouped[$0.persistentModelID]?.isEmpty == false }
+
+            if withHistory.isEmpty {
                 Section {
                     EmptyResultsView(window: selectedWindow)
                         .listRowBackground(Color.clear)
                 }
             } else {
                 Section("Personal Bests") {
-                    ForEach(workoutsWithHistory) { workout in
+                    ForEach(withHistory) { workout in
                         NavigationLink {
                             WODAttemptsView(workout: workout, window: selectedWindow)
                         } label: {
                             WODBestRow(
                                 workout: workout,
-                                window: selectedWindow,
-                                service: service
+                                records: grouped[workout.persistentModelID] ?? []
                             )
                         }
                     }
@@ -157,12 +179,8 @@ private struct SummaryStatView: View {
 
 private struct WODBestRow: View {
     let workout: Workout
-    let window: ResultsWindow
-    let service: ResultsService
-
-    private var records: [WorkoutRecord] {
-        service.history(for: workout, window: window.dateInterval)
-    }
+    /// Handed in already fetched — see `ResultsView.recordsByWorkout`.
+    let records: [WorkoutRecord]
 
     private var bestRecord: WorkoutRecord? {
         if workout.mode == .forTime {
@@ -279,6 +297,7 @@ struct WODAttemptsView: View {
     let window: ResultsWindow
 
     @Environment(\.modelContext) private var context
+    @State private var pendingDeletion: [WorkoutRecord] = []
 
     private var service: ResultsService {
         ResultsService(context: context)
@@ -330,11 +349,48 @@ struct WODAttemptsView: View {
                 ForEach(records) { record in
                     AttemptCardRow(record: record, workout: workout)
                 }
+                .onDelete { offsets in
+                    pendingDeletion = offsets.map { records[$0] }
+                }
             }
         }
         .listStyle(.insetGrouped)
         .navigationTitle(workout.name)
         .navigationBarTitleDisplayMode(.large)
+        .toolbar { EditButton() }
+        .confirmationDialog(
+            pendingDeletion.count == 1 ? "Delete this attempt?" : "Delete \(pendingDeletion.count) attempts?",
+            isPresented: Binding(
+                get: { !pendingDeletion.isEmpty },
+                set: { if !$0 { pendingDeletion = [] } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("Delete", role: .destructive) { confirmDeletion() }
+            Button("Cancel", role: .cancel) { pendingDeletion = [] }
+        } message: {
+            Text(pendingDeletion.contains(where: \.isPR)
+                 ? "This includes a personal record. Your next-best attempt will become the PR."
+                 : "This can't be undone.")
+        }
+    }
+
+    private func confirmDeletion() {
+        for record in pendingDeletion {
+            context.delete(record)
+        }
+        pendingDeletion = []
+
+        do {
+            try context.save()
+            // A deleted PR must not leave the workout with no record starred,
+            // and deleting a weak attempt must not leave a later one wrongly
+            // unstarred — so re-rank what remains.
+            service.recomputePRs(for: workout)
+            try context.save()
+        } catch {
+            context.rollback()
+        }
     }
 }
 
@@ -353,39 +409,59 @@ private struct AttemptCardRow: View {
 
             HStack {
                 Spacer()
-                ShareLink(
-                    item: renderedCard,
-                    preview: SharePreview(
-                        "\(workout.name) — \(record.date.formatted(date: .abbreviated, time: .omitted))",
-                        image: renderedCard
-                    )
-                ) {
+                if let shareImage {
+                    ShareLink(
+                        item: shareImage,
+                        preview: SharePreview(shareTitle, image: shareImage)
+                    ) {
+                        Label("Share", systemImage: "square.and.arrow.up")
+                            .font(.caption.bold())
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .tint(.accentColor)
+                } else {
+                    // Placeholder while the card rasterises, so the row's
+                    // height doesn't jump when the control appears.
                     Label("Share", systemImage: "square.and.arrow.up")
                         .font(.caption.bold())
+                        .foregroundStyle(.tertiary)
+                        .padding(.vertical, 7)
+                        .padding(.horizontal, 10)
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .tint(.accentColor)
             }
             .padding(.horizontal, 4)
             .padding(.bottom, 8)
         }
         .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
         .listRowBackground(Color.clear)
+        // Rasterise once, when the row first appears. This used to be a
+        // computed property that ShareLink evaluated twice on every render
+        // pass — two full-size images per row per pass, on the main thread.
+        // The @State also dies with the row, so offscreen cards aren't retained.
+        .task {
+            if shareImage == nil {
+                shareImage = renderCard()
+            }
+        }
+    }
+
+    private var shareTitle: String {
+        "\(workout.name) — \(record.date.formatted(date: .abbreviated, time: .omitted))"
     }
 
     @MainActor
-    private var renderedCard: Image {
+    private func renderCard() -> Image? {
         let renderer = ImageRenderer(
             content: ResultsCardView(record: record, workout: workout)
                 .frame(width: 320)
                 .padding()
                 .background(Color(.systemBackground))
         )
-        renderer.scale = 3
-        if let uiImage = renderer.uiImage {
-            return Image(uiImage: uiImage)
-        }
-        return Image(systemName: "photo")
+        // 2x is plenty for a shared image and roughly halves the bitmap's
+        // memory against the previous 3x.
+        renderer.scale = 2
+        guard let uiImage = renderer.uiImage else { return nil }
+        return Image(uiImage: uiImage)
     }
 }

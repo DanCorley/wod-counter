@@ -24,7 +24,7 @@ enum BenchmarkSeed {
         ]
 
         workout.blocks = [block]
-        return workout
+        return stamped(workout)
     }
 
     static func murph(in context: ModelContext) -> Workout {
@@ -48,7 +48,7 @@ enum BenchmarkSeed {
         ]
 
         workout.blocks = [block]
-        return workout
+        return stamped(workout)
     }
 
     static func fran(in context: ModelContext) -> Workout {
@@ -82,7 +82,7 @@ enum BenchmarkSeed {
         ]
 
         workout.blocks = [block21, block15, block9]
-        return workout
+        return stamped(workout)
     }
 
     static func angie(in context: ModelContext) -> Workout {
@@ -108,7 +108,7 @@ enum BenchmarkSeed {
         ]
 
         workout.blocks = [block]
-        return workout
+        return stamped(workout)
     }
 
     static func grace(in context: ModelContext) -> Workout {
@@ -128,7 +128,7 @@ enum BenchmarkSeed {
         ]
 
         workout.blocks = [block]
-        return workout
+        return stamped(workout)
     }
 
     static func diane(in context: ModelContext) -> Workout {
@@ -162,7 +162,7 @@ enum BenchmarkSeed {
         ]
 
         workout.blocks = [block21, block15, block9]
-        return workout
+        return stamped(workout)
     }
 
     static func helen(in context: ModelContext) -> Workout {
@@ -186,7 +186,7 @@ enum BenchmarkSeed {
         ]
 
         workout.blocks = [block]
-        return workout
+        return stamped(workout)
     }
 
     static func dt(in context: ModelContext) -> Workout {
@@ -210,6 +210,66 @@ enum BenchmarkSeed {
         ]
 
         workout.blocks = [block]
+        return stamped(workout)
+    }
+
+    /// Where a seeded exercise belongs: which block, and where within it.
+    struct SeedPosition: Sendable, Equatable {
+        let block: Int
+        let exercise: Int
+    }
+
+    /// The canonical block-and-exercise order of each built-in, as plain data.
+    ///
+    /// Deliberately a literal table rather than something derived by running the
+    /// factories: the one caller is the `sortIndex` backfill, which runs during
+    /// app startup while the real container is still being set up, and building
+    /// `@Model` objects against a second container there is not safe.
+    /// `BenchmarkSeedTests` asserts this stays in step with the factories above.
+    static let canonicalLabelOrder: [String: [[String]]] = [
+        "Cindy": [["5 Pull-ups", "10 Push-ups", "15 Air Squats"]],
+        "Murph": [["100 Pull-ups", "200 Push-ups", "300 Air Squats"]],
+        "Fran": [
+            ["21 Thrusters (95 lb)", "21 Pull-ups"],
+            ["15 Thrusters (95 lb)", "15 Pull-ups"],
+            ["9 Thrusters (95 lb)", "9 Pull-ups"],
+        ],
+        "Angie": [["100 Pull-ups", "100 Push-ups", "100 Sit-ups", "100 Air Squats"]],
+        "Grace": [["30 Clean & Jerk (135 lb)"]],
+        "Diane": [
+            ["21 Deadlifts (225 lb)", "21 Handstand Push-ups"],
+            ["15 Deadlifts (225 lb)", "15 Handstand Push-ups"],
+            ["9 Deadlifts (225 lb)", "9 Handstand Push-ups"],
+        ],
+        "Helen": [["400 m Run", "21 Kettlebell Swings (53/35 lb)", "12 Pull-ups"]],
+        "DT": [["12 Deadlifts (225 lb)", "9 Hang Power Cleans (155 lb)", "6 Push Jerks (155 lb)"]],
+    ]
+
+    /// `canonicalLabelOrder` flattened to a label-to-position lookup.
+    static func canonicalPositions() -> [String: [String: SeedPosition]] {
+        canonicalLabelOrder.mapValues { blocks in
+            var positions: [String: SeedPosition] = [:]
+            for (blockIndex, labels) in blocks.enumerated() {
+                for (exerciseIndex, label) in labels.enumerated() {
+                    positions[label] = SeedPosition(block: blockIndex, exercise: exerciseIndex)
+                }
+            }
+            return positions
+        }
+    }
+
+    /// Stamps `sortIndex` on the workout's blocks and their exercises from the
+    /// order the seed assigned them. The factories above build plain Swift
+    /// arrays, so array position is authoritative at this point — but it stops
+    /// being so once the objects round-trip through SwiftData, which is why the
+    /// order has to be recorded now.
+    private static func stamped(_ workout: Workout) -> Workout {
+        for (blockIndex, block) in workout.blocks.enumerated() {
+            block.sortIndex = blockIndex
+            for (exerciseIndex, exercise) in block.exercises.enumerated() {
+                exercise.sortIndex = exerciseIndex
+            }
+        }
         return workout
     }
 

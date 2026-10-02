@@ -64,8 +64,11 @@ final class ResultsService {
         )
         guard let allRecords = try? context.fetch(descriptor) else { return nil }
 
+        // Only complete efforts set the bar — otherwise a partial attempt's
+        // fast-but-unearned time becomes the record to beat.
         let candidates = allRecords.filter {
             $0.workout?.id == workout.id && $0.date < date && $0.kind == kind
+                && Self.isPREligible(kind: $0.kind, finishedReason: $0.finishedReason)
         }
 
         if kind == "rounds" {
@@ -78,11 +81,61 @@ final class ResultsService {
         }
     }
 
+    /// Re-marks `isPR` across a workout's whole history.
+    ///
+    /// Needed after a deletion: removing the record that held the PR would
+    /// otherwise leave the workout with nothing starred, and removing an early
+    /// weak attempt can make a later one newly best. Walks the records oldest
+    /// first and stars each one that beat everything eligible before it, which
+    /// reproduces what the live PR check would have decided at the time.
+    func recomputePRs(for workout: Workout) {
+        let ordered = history(for: workout).sorted { $0.date < $1.date }
+
+        var bestRounds: Int?
+        var bestTime: TimeInterval?
+
+        for record in ordered {
+            guard Self.isPREligible(kind: record.kind, finishedReason: record.finishedReason) else {
+                record.isPR = false
+                continue
+            }
+
+            if record.kind == "rounds" {
+                let isBest = bestRounds.map { record.roundsCompleted > $0 } ?? true
+                record.isPR = isBest
+                if isBest { bestRounds = record.roundsCompleted }
+            } else {
+                let isBest = bestTime.map { record.activeTime < $0 } ?? true
+                record.isPR = isBest
+                if isBest { bestTime = record.activeTime }
+            }
+        }
+    }
+
+    /// Whether a finish is eligible to be ranked as a PR at all.
+    ///
+    /// A time PR means the athlete did the prescribed work — "Fran 2:30" is
+    /// meaningless if only half the reps were logged, and ranking a partial on
+    /// time alone produces a faster-for-less-work record that can never be
+    /// beaten. A rounds PR requires the clock to have run its full course, for
+    /// the same reason: stopping at 8:00 of a 20-minute AMRAP is not a
+    /// comparable effort. Manual finishes are never PRs.
+    static func isPREligible(kind: String, finishedReason: String?) -> Bool {
+        switch kind {
+        case "time":   return finishedReason == FinishedReason.goalReached.rawValue
+        case "rounds": return finishedReason == FinishedReason.clockExpired.rawValue
+        default:       return false
+        }
+    }
+
     /// Determines if a completed workout performance is a new PR.
-    static func isNewPR(workout: Workout, kind: String, rounds: Int, activeTime: TimeInterval, before date: Date, in context: ModelContext) -> Bool {
+    static func isNewPR(workout: Workout, kind: String, rounds: Int, activeTime: TimeInterval,
+                        before date: Date, finishedReason: String?, in context: ModelContext) -> Bool {
+        guard isPREligible(kind: kind, finishedReason: finishedReason) else { return false }
+
         let service = ResultsService(context: context)
         guard let best = service.previousBest(for: workout, kind: kind, asOf: date) else {
-            return true // First attempt is always a PR
+            return true // First complete attempt sets the bar.
         }
 
         if kind == "rounds" {
