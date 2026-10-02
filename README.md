@@ -1,6 +1,6 @@
 # WODCounter
 
-A macOS CrossFit Workout of the Day (WOD) counter and timer built with SwiftUI and SwiftData.
+An iOS CrossFit Workout of the Day (WOD) counter and timer built with SwiftUI and SwiftData.
 
 Track benchmark WODs, build custom workouts, run live timed sessions, and review your results — all on device.
 
@@ -17,13 +17,13 @@ Track benchmark WODs, build custom workouts, run live timed sessions, and review
 ## Tech Stack
 
 - Swift 5.9+ / SwiftUI
-- SwiftData (macOS 14+)
+- SwiftData (iOS 17+)
 - XCTest for unit and smoke tests
 - Xcode project built with XcodeGen-friendly layout (`WODCounter/`, `WODCounterTests/`)
 
 ## Getting Started
 
-Requirements: macOS 14+, Xcode 15+.
+Requirements: iOS 17+ (iPhone or iPad), Xcode 15+.
 
 1. Clone the repository.
 2. Open `wod-counter.xcodeproj` in Xcode.
@@ -34,7 +34,8 @@ Requirements: macOS 14+, Xcode 15+.
 Run the test suite from the command line:
 
 ```sh
-xcodebuild test -project wod-counter.xcodeproj -scheme WODCounter -destination 'platform=macOS'
+xcodebuild test -project wod-counter.xcodeproj -scheme WODCounter \
+  -destination 'platform=iOS Simulator,OS=latest,name=iPhone 17'
 ```
 
 Coverage includes the simulator engine, timer service, results service, benchmark seeding, and view smoke tests.
