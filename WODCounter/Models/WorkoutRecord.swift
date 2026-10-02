@@ -44,6 +44,21 @@ import SwiftData
         }
     }
 
+    /// Whether the athlete positively stopped this attempt early.
+    ///
+    /// Deliberately not `!isRankable`: a record written before `finishedReason`
+    /// existed has unknown provenance, and labelling it "Incomplete" would be
+    /// asserting something we do not know. Only an explicit manual stop counts.
+    var wasStoppedEarly: Bool {
+        finishedReason == FinishedReason.manual.rawValue
+    }
+
+    /// "2 of 90 reps", when the quota is known.
+    var completionSummary: String? {
+        guard let repsQuota, repsQuota > 0 else { return nil }
+        return "\(totalReps) of \(repsQuota) reps"
+    }
+
     /// Fraction of prescribed reps completed, when the quota is known.
     var completionFraction: Double? {
         guard let repsQuota, repsQuota > 0 else { return nil }

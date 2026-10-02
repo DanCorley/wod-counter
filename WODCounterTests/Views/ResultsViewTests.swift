@@ -230,6 +230,58 @@ struct ResultsViewTests {
         #expect(service.history(for: workout).count == 1)
     }
 
+    // MARK: - Incomplete attempt labelling
+
+    @Test func manuallyStoppedAttemptIsLabelledIncomplete() throws {
+        let container = Container.inMemory()
+        let context = ModelContext(container)
+        let workout = makeWorkout(context: context, mode: .topTime)
+
+        let record = insertRecord(workout: workout, context: context, daysAgo: 1,
+                                  rounds: 0, activeTime: 5, finishedReason: .manual)
+        record.totalReps = 2
+        record.repsQuota = 90
+
+        #expect(record.wasStoppedEarly)
+        #expect(record.completionSummary == "2 of 90 reps")
+        #expect(record.completionFraction == 2.0 / 90.0)
+    }
+
+    @Test func completedAttemptsAreNotLabelledIncomplete() throws {
+        let container = Container.inMemory()
+        let context = ModelContext(container)
+        let topTime = makeWorkout(context: context, mode: .topTime)
+        let forTime = makeWorkout(context: context, mode: .forTime)
+
+        let finished = insertRecord(workout: topTime, context: context, daysAgo: 1,
+                                    rounds: 3, activeTime: 240, finishedReason: .goalReached)
+        let capped = insertRecord(workout: forTime, context: context, daysAgo: 1,
+                                  rounds: 12, activeTime: 1200, finishedReason: .clockExpired)
+
+        #expect(finished.wasStoppedEarly == false)
+        #expect(capped.wasStoppedEarly == false)
+    }
+
+    /// A record written before finishedReason existed has unknown provenance.
+    /// It must not be ranked, but it must also not be asserted as incomplete.
+    @Test func legacyRecordIsNeitherRankableNorLabelledIncomplete() throws {
+        let container = Container.inMemory()
+        let context = ModelContext(container)
+        let workout = makeWorkout(context: context, mode: .topTime)
+
+        let legacy = WorkoutRecord(
+            workout: workout, date: Date(), kind: "time",
+            roundsCompleted: 3, totalReps: 90, elapsedTime: 300,
+            pausedTime: 0, activeTime: 300, isPR: false
+        )
+        context.insert(legacy)
+
+        #expect(legacy.finishedReason == nil)
+        #expect(legacy.isRankable == false)
+        #expect(legacy.wasStoppedEarly == false, "Unknown is not the same as incomplete")
+        #expect(legacy.completionSummary == nil)
+    }
+
     // MARK: - Best Record
 
     @Test func bestForTimeIsHighestRounds() throws {

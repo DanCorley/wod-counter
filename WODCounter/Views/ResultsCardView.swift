@@ -36,6 +36,7 @@ struct ResultsCardView: View {
 
                 Spacer()
 
+                // An early stop can never be a PR, so these share one slot.
                 if record.isPR {
                     Label("PR", systemImage: "star.fill")
                         .font(.caption.bold())
@@ -44,6 +45,17 @@ struct ResultsCardView: View {
                         .padding(.vertical, 4)
                         .background(Color.yellow)
                         .clipShape(Capsule())
+                } else if record.wasStoppedEarly {
+                    // Explains why a faster time than the PR is not the best:
+                    // the work was not finished, so it is not comparable.
+                    Label("Incomplete", systemImage: "flag.slash")
+                        .font(.caption.bold())
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 4)
+                        .background(
+                            Capsule().strokeBorder(.secondary.opacity(0.4), lineWidth: 1)
+                        )
                 }
             }
             .padding()
@@ -59,7 +71,9 @@ struct ResultsCardView: View {
 
                 Text(primaryMetric)
                     .font(.system(size: 44, weight: .heavy, design: .rounded))
-                    .foregroundStyle(.primary)
+                    // Dimmed when the work was not finished, so the headline
+                    // number does not read as an achieved result.
+                    .foregroundStyle(record.wasStoppedEarly ? .secondary : .primary)
 
                 if workout.mode == .forTime {
                     Text("Active Time: \(Format.duration(record.activeTime))")
@@ -68,6 +82,13 @@ struct ResultsCardView: View {
                 } else {
                     Text("\(record.roundsCompleted) rounds · \(record.totalReps) total reps")
                         .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+
+                if record.wasStoppedEarly {
+                    Text(record.completionSummary.map { "Stopped early · \($0)" }
+                         ?? "Stopped before finishing")
+                        .font(.caption)
                         .foregroundStyle(.secondary)
                 }
             }
