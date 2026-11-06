@@ -2,6 +2,7 @@ import Foundation
 import SwiftData
 
 enum SeedMigration {
+    @MainActor
     static func applySeed(to container: ModelContainer) {
         let context = container.mainContext
 
