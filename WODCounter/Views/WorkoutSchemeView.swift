@@ -5,7 +5,7 @@ struct WorkoutSchemeView: View {
     var isCompact: Bool = false
 
     var body: some View {
-        if workout.blocks.isEmpty {
+        if workout.orderedBlocks.isEmpty {
             Text("No exercises specified.")
                 .foregroundStyle(.secondary)
         } else if isCompact {
@@ -15,15 +15,19 @@ struct WorkoutSchemeView: View {
         }
     }
 
+    private var allExercises: [Exercise] {
+        workout.orderedBlocks.flatMap(\.orderedExercises)
+    }
+
     private var compactView: some View {
         VStack(alignment: .leading, spacing: 2) {
-            ForEach(workout.blocks.flatMap { $0.exercises }.prefix(3)) { exercise in
+            ForEach(allExercises.prefix(3)) { exercise in
                 Text(exercise.displayLabel ?? exercise.movement?.name ?? "Exercise")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
-            if workout.blocks.flatMap({ $0.exercises }).count > 3 {
+            if allExercises.count > 3 {
                 Text("+ more")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
@@ -32,7 +36,7 @@ struct WorkoutSchemeView: View {
     }
 
     private var expandedView: some View {
-        ForEach(Array(workout.blocks.enumerated()), id: \.offset) { index, block in
+        ForEach(Array(workout.orderedBlocks.enumerated()), id: \.offset) { index, block in
             VStack(alignment: .leading, spacing: 6) {
                 HStack {
                     Text(workout.blockHeader(for: block, index: index))
@@ -40,13 +44,13 @@ struct WorkoutSchemeView: View {
                         .foregroundStyle(.secondary)
                     Spacer()
                     if let rest = block.restAfterBlock, rest > 0 {
-                        Text("Rest: \(rest)s")
+                        Text("Rest after \(block.repeatTimes > 1 ? "each round" : "block"): \(rest)s")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
                 }
 
-                ForEach(block.exercises) { exercise in
+                ForEach(block.orderedExercises) { exercise in
                     HStack(spacing: 8) {
                         Image(systemName: "circle.fill")
                             .font(.system(size: 6))

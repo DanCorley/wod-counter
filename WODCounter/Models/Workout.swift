@@ -28,6 +28,24 @@ import SwiftData
         self.updatedAt = updatedAt
     }
 
+    // MARK: - Ordering
+
+    /// Blocks in explicit `sortOrder` order.
+    ///
+    /// Legacy rows (and any rows whose `sortOrder` ties) fall back to the
+    /// to-many relationship's current array order. That is the only ordering
+    /// hint those rows have, and it keeps pre-migration behavior unchanged.
+    var orderedBlocks: [RoundBlock] {
+        blocks.enumerated()
+            .sorted { lhs, rhs in
+                if lhs.element.sortOrder != rhs.element.sortOrder {
+                    return lhs.element.sortOrder < rhs.element.sortOrder
+                }
+                return lhs.offset < rhs.offset
+            }
+            .map(\.element)
+    }
+
     // MARK: - Category Helpers
     var isGirlBenchmark: Bool {
         category == "Girl"
@@ -51,7 +69,7 @@ import SwiftData
     }
 
     func blockHeader(for block: RoundBlock, index: Int) -> String {
-        let total = blocks.count
+        let total = orderedBlocks.count
         if total > 1 {
             return "Block \(index + 1) of \(total)"
         } else if block.repeatTimes > 1 {
