@@ -2,63 +2,36 @@ import SwiftUI
 import SwiftData
 import Charts
 
-// MARK: - Window
-
-enum ResultsWindow: String, CaseIterable, Identifiable {
-    case sevenDays  = "7d"
-    case thirtyDays = "30d"
-    case ninetyDays = "90d"
-    case allTime    = "All"
-
-    var id: String { rawValue }
-
-    var dateInterval: DateInterval? {
-        let now = Date()
-        switch self {
-        case .sevenDays:  return DateInterval(start: Calendar.current.date(byAdding: .day, value: -7, to: now)!, end: now)
-        case .thirtyDays: return DateInterval(start: Calendar.current.date(byAdding: .day, value: -30, to: now)!, end: now)
-        case .ninetyDays: return DateInterval(start: Calendar.current.date(byAdding: .day, value: -90, to: now)!, end: now)
-        case .allTime:    return nil
-        }
-    }
-
-    var label: String {
-        switch self {
-        case .sevenDays:  return "Past 7 days"
-        case .thirtyDays: return "Past 30 days"
-        case .ninetyDays: return "Past 90 days"
-        case .allTime:    return "All time"
-        }
-    }
-}
-
 // MARK: - ResultsView
 
 struct ResultsView: View {
-    @Environment(\.modelContext) private var context
     @Query(sort: \Workout.name) private var workouts: [Workout]
-    @AppStorage("defaultResultsWindow") private var storedWindow: String = ResultsWindow.thirtyDays.rawValue
+    // Observing records directly is the refresh path for newly saved attempts.
+    @Query(sort: [SortDescriptor(\WorkoutRecord.date, order: .reverse)]) private var records: [WorkoutRecord]
+    @AppStorage(ResultsWindow.storageKey) private var storedWindow: String = ResultsWindow.defaultValue.rawValue
 
     private var selectedWindow: ResultsWindow {
-        ResultsWindow(rawValue: storedWindow) ?? .thirtyDays
+        ResultsWindow(storedValue: storedWindow)
     }
 
-    private var service: ResultsService {
-        ResultsService(context: context)
+    /// Records for the selected window, filtered once per render.
+    private var windowRecords: [WorkoutRecord] {
+        ResultsService.filter(records, window: selectedWindow.dateInterval)
     }
 
-    private var windowSummary: WindowSummary {
-        service.summary(window: selectedWindow.dateInterval)
-    }
-
-    /// Workouts that have at least one record in the selected window.
-    private var workoutsWithHistory: [Workout] {
-        workouts.filter { workout in
-            !service.history(for: workout, window: selectedWindow.dateInterval).isEmpty
+    /// Workouts with at least one record in the selected window, grouped from one fetch.
+    private func bestRows(for records: [WorkoutRecord]) -> [WorkoutBestRowData] {
+        let workoutsByID = Dictionary(uniqueKeysWithValues: workouts.map { ($0.persistentModelID, $0) })
+        return ResultsService.bestSummaries(from: records).compactMap { summary in
+            workoutsByID[summary.workoutID].map { WorkoutBestRowData(workout: $0, summary: summary) }
         }
     }
 
     var body: some View {
+        let currentRecords = windowRecords
+        let summary = ResultsService.summary(from: currentRecords)
+        let rows = bestRows(for: currentRecords)
+
         List {
             // Window Picker
             Section {
@@ -76,28 +49,24 @@ struct ResultsView: View {
 
             // Summary Banner
             Section {
-                SummaryBannerView(window: selectedWindow, summary: windowSummary)
+                SummaryBannerView(window: selectedWindow, summary: summary)
                     .listRowInsets(EdgeInsets())
                     .listRowBackground(Color.clear)
             }
 
             // Per-WOD Bests
-            if workoutsWithHistory.isEmpty {
+            if rows.isEmpty {
                 Section {
                     EmptyResultsView(window: selectedWindow)
                         .listRowBackground(Color.clear)
                 }
             } else {
                 Section("Personal Bests") {
-                    ForEach(workoutsWithHistory) { workout in
+                    ForEach(rows) { row in
                         NavigationLink {
-                            WODAttemptsView(workout: workout, window: selectedWindow)
+                            WODAttemptsView(workout: row.workout, window: selectedWindow)
                         } label: {
-                            WODBestRow(
-                                workout: workout,
-                                window: selectedWindow,
-                                service: service
-                            )
+                            WODBestRow(summary: row.summary)
                         }
                     }
                 }
@@ -106,6 +75,15 @@ struct ResultsView: View {
         .listStyle(.insetGrouped)
         .navigationTitle("History")
     }
+}
+
+// MARK: - Row Data
+
+private struct WorkoutBestRowData: Identifiable {
+    let workout: Workout
+    let summary: WorkoutBestSummary
+
+    var id: PersistentIdentifier { summary.workoutID }
 }
 
 // MARK: - Summary Banner
@@ -156,91 +134,53 @@ private struct SummaryStatView: View {
 // MARK: - Per-WOD Best Row
 
 private struct WODBestRow: View {
-    let workout: Workout
-    let window: ResultsWindow
-    let service: ResultsService
-
-    private var records: [WorkoutRecord] {
-        service.history(for: workout, window: window.dateInterval)
-    }
-
-    private var bestRecord: WorkoutRecord? {
-        if workout.mode == .forTime {
-            return records.max(by: { $0.roundsCompleted < $1.roundsCompleted })
-        } else {
-            return records.min(by: { $0.activeTime < $1.activeTime })
-        }
-    }
-
-    private var bestMetric: String {
-        guard let best = bestRecord else { return "—" }
-        return workout.mode == .forTime
-            ? "\(best.roundsCompleted) rds"
-            : Format.duration(best.activeTime)
-    }
-
-    private var deltaText: String? {
-        guard records.count >= 2, let best = bestRecord else { return nil }
-
-        // Second-best attempt (excluding the best record itself)
-        let others = records.filter { $0.id != best.id }
-
-        if workout.mode == .forTime {
-            guard let prevBest = others.max(by: { $0.roundsCompleted < $1.roundsCompleted }) else { return nil }
-            let delta = best.roundsCompleted - prevBest.roundsCompleted
-            if delta == 0 { return "=" }
-            return delta > 0 ? "+\(delta) rds" : "\(delta) rds"
-        } else {
-            guard let prevBest = others.min(by: { $0.activeTime < $1.activeTime }) else { return nil }
-            let delta = prevBest.activeTime - best.activeTime
-            if abs(delta) < 1 { return "=" }
-            let sign = delta > 0 ? "−" : "+"
-            return "\(sign)\(Format.duration(abs(delta)))"
-        }
-    }
+    let summary: WorkoutBestSummary
 
     private var deltaColor: Color {
-        guard let text = deltaText, text != "=" else { return .secondary }
-        // For for-time: "+" is improvement. For top-time: "−" (faster) is improvement.
-        if workout.mode == .forTime {
-            return text.hasPrefix("+") ? .green : .red
-        } else {
-            return text.hasPrefix("−") ? .green : .red
+        guard let delta = summary.delta else { return .secondary }
+        switch delta {
+        case .equal:
+            return .secondary
+        case .regressed:
+            return .red
         }
-    }
-
-    private var hasPR: Bool {
-        records.contains(where: { $0.isPR })
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
-                Text(workout.name)
+                Text(summary.workoutName)
                     .font(.headline)
-                if hasPR {
+                if summary.hasPR {
                     Image(systemName: "star.fill")
                         .font(.caption)
                         .foregroundStyle(.yellow)
                 }
                 Spacer()
-                WorkoutModeBadge(mode: workout.mode)
+                WorkoutModeBadge(mode: summary.mode)
             }
 
             HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text(bestMetric)
+                Text(summary.bestMetricText)
                     .font(.title3.bold())
                     .foregroundStyle(.primary)
 
-                if let delta = deltaText {
-                    Text("(\(delta))")
-                        .font(.subheadline.bold())
-                        .foregroundStyle(deltaColor)
+                if let delta = summary.delta {
+                    HStack(alignment: .firstTextBaseline, spacing: 3) {
+                        Text(delta.text(for: summary.mode))
+                            .font(.subheadline.bold())
+                            .foregroundStyle(deltaColor)
+                        Text("vs last")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("\(delta.text(for: summary.mode)) versus last attempt")
                 }
 
                 Spacer()
 
-                Text("\(records.count) attempt\(records.count == 1 ? "" : "s")")
+                Text("\(summary.attemptCount) attempt\(summary.attemptCount == 1 ? "" : "s")")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -278,26 +218,11 @@ struct WODAttemptsView: View {
     let workout: Workout
     let window: ResultsWindow
 
-    @Environment(\.modelContext) private var context
-
-    private var service: ResultsService {
-        ResultsService(context: context)
-    }
+    // A record insert refreshes this drill-down without relying on the parent view.
+    @Query(sort: [SortDescriptor(\WorkoutRecord.date, order: .reverse)]) private var allRecords: [WorkoutRecord]
 
     private var records: [WorkoutRecord] {
-        service.history(for: workout, window: window.dateInterval)
-    }
-
-    /// Points for the best-over-time bar chart: (date, metric value).
-    private var chartData: [(date: Date, value: Double)] {
-        records
-            .sorted(by: { $0.date < $1.date })
-            .map { record in
-                let value = workout.mode == .forTime
-                    ? Double(record.roundsCompleted)
-                    : record.activeTime
-                return (date: record.date, value: value)
-            }
+        ResultsService.filter(allRecords, workout: workout, window: window.dateInterval)
     }
 
     private var chartYLabel: String {
@@ -305,17 +230,27 @@ struct WODAttemptsView: View {
     }
 
     var body: some View {
+        let attempts = records
+        let chartPoints = ResultsService.bestSeries(from: attempts, mode: workout.mode)
+
         List {
-            // Progress chart (only when ≥ 2 records)
-            if chartData.count >= 2 {
-                Section("Progression") {
-                    Chart(chartData, id: \.date) { point in
-                        BarMark(
-                            x: .value("Date", point.date, unit: .day),
+            // Progression chart (only when at least two bests exist)
+            if chartPoints.count >= 2 {
+                Section("Best Progression") {
+                    Chart(chartPoints) { point in
+                        LineMark(
+                            x: .value("Date", point.date),
                             y: .value(chartYLabel, point.value)
                         )
-                        .foregroundStyle(Color.accentColor.gradient)
-                        .cornerRadius(4)
+                        .interpolationMethod(.stepEnd)
+                        .foregroundStyle(Color.accentColor)
+
+                        PointMark(
+                            x: .value("Date", point.date),
+                            y: .value(chartYLabel, point.value)
+                        )
+                        .foregroundStyle(Color.accentColor)
+                        .symbolSize(30)
                     }
                     .frame(height: 160)
                     .chartYAxis {
@@ -327,7 +262,7 @@ struct WODAttemptsView: View {
 
             // Individual attempt cards
             Section("Attempts") {
-                ForEach(records) { record in
+                ForEach(attempts) { record in
                     AttemptCardRow(record: record, workout: workout)
                 }
             }

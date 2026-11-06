@@ -3,11 +3,16 @@ import SwiftUI
 struct TimerView: View {
     @Environment(ServiceFactory.self) private var serviceFactory
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.scenePhase) private var scenePhase
 
     let workout: Workout
     @State private var service: WorkoutTimerService?
     @State private var selectedTaskID: UUID?
     @State private var isConfirmingFinish = false
+    @State private var isConfirmingClose = false
+
+    @ScaledMetric(relativeTo: .largeTitle) private var clockSize: CGFloat = 56
+    @ScaledMetric(relativeTo: .largeTitle) private var remainingSize: CGFloat = 54
 
     private var snapshot: SessionSnapshot {
         service?.snapshot ?? .idle
@@ -25,6 +30,47 @@ struct TimerView: View {
             return task
         }
         return tasks.first(where: { !$0.isComplete })
+    }
+
+    private struct TaskGroup: Identifiable {
+        let id: String
+        let title: String
+        let tasks: [WODSimulator.Task]
+    }
+
+    private var needsGrouping: Bool {
+        snapshot.totalRounds > 1 || workout.orderedBlocks.count > 1
+    }
+
+    /// Consecutive tasks sharing a block/round, labelled for multi-round or
+    /// multi-block workouts. Single-round workouts keep the flat list.
+    private var groupedTasks: [TaskGroup] {
+        guard needsGrouping else {
+            return [TaskGroup(id: "all", title: "", tasks: tasks)]
+        }
+
+        var groups: [TaskGroup] = []
+        for task in tasks {
+            let id = "\(task.blockIndex)-\(task.roundNumber)"
+            if let last = groups.last, last.id == id {
+                groups[groups.count - 1] = TaskGroup(
+                    id: last.id,
+                    title: last.title,
+                    tasks: last.tasks + [task]
+                )
+            } else {
+                groups.append(TaskGroup(id: id, title: groupTitle(for: task), tasks: [task]))
+            }
+        }
+        return groups
+    }
+
+    private func groupTitle(for task: WODSimulator.Task) -> String {
+        let blocks = workout.orderedBlocks
+        if blocks.count > 1, blocks.indices.contains(task.blockIndex) {
+            return workout.blockHeader(for: blocks[task.blockIndex], index: task.blockIndex)
+        }
+        return "Round \(task.roundNumber)"
     }
 
     private var roundIndicatorText: String {
@@ -62,7 +108,13 @@ struct TimerView: View {
                     if isIdle {
                         Button("Cancel") { dismiss() }
                     } else {
-                        Button("Close") { dismiss() }
+                        Button("Close") {
+                            if snapshot.isLive {
+                                isConfirmingClose = true
+                            } else {
+                                dismiss()
+                            }
+                        }
                     }
                 }
             }
@@ -70,6 +122,14 @@ struct TimerView: View {
         .onAppear {
             if service == nil {
                 service = serviceFactory.makeTimerService(for: workout)
+            }
+        }
+        // Auto-pause when the app leaves the foreground so background time is
+        // recorded as pause rather than silently lost. Resuming is always an
+        // explicit athlete action.
+        .onChange(of: scenePhase) { _, phase in
+            if phase != .active {
+                service?.pause()
             }
         }
         .confirmationDialog(
@@ -82,11 +142,28 @@ struct TimerView: View {
             }
             Button("Cancel", role: .cancel) {}
         }
+        .confirmationDialog(
+            "Discard This Session?",
+            isPresented: $isConfirmingClose,
+            titleVisibility: .visible
+        ) {
+            Button("Discard Session", role: .destructive) {
+                service?.discard()
+                dismiss()
+            }
+            Button("Keep Working", role: .cancel) {}
+        } message: {
+            Text("Your workout is still in progress. Discarding will not save a result.")
+        }
         .sheet(isPresented: Binding(
             get: { snapshot.isFinished },
             set: { _ in }
         )) {
-            WorkoutCompletionSheet(workout: workout, snapshot: snapshot) {
+            WorkoutCompletionSheet(
+                workout: workout,
+                snapshot: snapshot,
+                record: service?.completedRecord
+            ) {
                 dismiss()
             }
         }
@@ -134,8 +211,12 @@ struct TimerView: View {
 
             VStack(spacing: 2) {
                 Text(Format.duration(snapshot.activeElapsed))
-                    .font(.system(size: 56, weight: .heavy, design: .monospaced))
+                    .font(.system(size: clockSize, weight: .heavy, design: .monospaced))
                     .contentTransition(.numericText())
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.5)
+                    .accessibilityLabel("Elapsed time")
+                    .accessibilityValue(Format.duration(snapshot.activeElapsed))
                 if let label = timeCapLabel {
                     Text("\(label) · Elapsed")
                         .font(.caption)
@@ -175,19 +256,34 @@ struct TimerView: View {
     private var remainingHeadline: some View {
         HStack(alignment: .firstTextBaseline, spacing: 6) {
             Text("\(snapshot.totalRemaining)")
-                .font(.system(size: 54, weight: .heavy, design: .rounded))
+                .font(.system(size: remainingSize, weight: .heavy, design: .rounded))
                 .contentTransition(.numericText())
+                .lineLimit(1)
+                .minimumScaleFactor(0.5)
             Text("reps left")
                 .font(.title3)
                 .foregroundStyle(.secondary)
         }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Remaining reps")
+        .accessibilityValue("\(snapshot.totalRemaining)")
     }
 
     private var taskList: some View {
         ScrollView {
-            LazyVStack(spacing: 8) {
-                ForEach(tasks) { task in
-                    taskRow(task)
+            LazyVStack(alignment: .leading, spacing: 8) {
+                ForEach(groupedTasks) { group in
+                    if !group.title.isEmpty {
+                        Text(group.title)
+                            .font(.caption.bold())
+                            .foregroundStyle(.secondary)
+                            .textCase(.uppercase)
+                            .padding(.horizontal, 4)
+                            .padding(.top, 4)
+                    }
+                    ForEach(group.tasks) { task in
+                        taskRow(task)
+                    }
                 }
             }
             .padding(.horizontal)
@@ -195,7 +291,8 @@ struct TimerView: View {
     }
 
     private func taskRow(_ task: WODSimulator.Task) -> some View {
-        Button {
+        let isActive = activeTask?.id == task.id
+        return Button {
             if !task.isComplete {
                 selectedTaskID = task.id
             }
@@ -203,7 +300,7 @@ struct TimerView: View {
             HStack(spacing: 12) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(task.displayLabel)
-                        .font(.body.weight(activeTask?.id == task.id ? .semibold : .regular))
+                        .font(.body.weight(isActive ? .semibold : .regular))
                         .foregroundStyle(task.isComplete ? .secondary : .primary)
                     if task.quota > 1 {
                         Text("\(task.completed) of \(task.quota) reps")
@@ -219,36 +316,55 @@ struct TimerView: View {
                 } else {
                     Text("\(task.remaining) left")
                         .font(.subheadline.bold())
-                        .foregroundStyle(activeTask?.id == task.id ? Color.accentColor : .secondary)
+                        .foregroundStyle(isActive ? Color.accentColor : .secondary)
                 }
             }
             .padding(12)
             .background(
                 RoundedRectangle(cornerRadius: 12)
-                    .fill(activeTask?.id == task.id
+                    .fill(isActive
                           ? Color.accentColor.opacity(0.12)
                           : Color.secondary.opacity(0.08))
             )
         }
         .buttonStyle(.plain)
         .disabled(task.isComplete)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(task.displayLabel)\(isActive ? ", active task" : "")")
+        .accessibilityValue(task.isComplete ? "Complete" : "\(task.remaining) reps remaining")
     }
 
     private func quickCounterBar(for task: WODSimulator.Task) -> some View {
-        HStack(spacing: 12) {
-            ForEach([1, 5, 10, 25], id: \.self) { count in
-                Button {
-                    _ = service?.logReps(taskID: task.id, count: count)
-                } label: {
-                    Text("+\(count)")
-                        .font(.headline)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 12)
+        VStack(spacing: 8) {
+            HStack(spacing: 12) {
+                ForEach([1, 5, 10, 25], id: \.self) { count in
+                    Button {
+                        _ = service?.logReps(taskID: task.id, count: count)
+                    } label: {
+                        Text("+\(count)")
+                            .font(.headline)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 12)
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(.green)
+                    .disabled(!snapshot.isRunning || count > task.remaining)
+                    .accessibilityLabel("Add \(count) reps to \(task.displayLabel)")
                 }
-                .buttonStyle(.bordered)
-                .tint(.green)
-                .disabled(!snapshot.isRunning || count > task.remaining)
             }
+
+            Button {
+                _ = service?.undoLastReps()
+            } label: {
+                Label("Undo", systemImage: "arrow.uturn.backward")
+                    .font(.subheadline.bold())
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
+            }
+            .buttonStyle(.bordered)
+            .tint(.secondary)
+            .disabled(!snapshot.isRunning || !(service?.canUndo ?? false))
+            .accessibilityHint("Reverses the most recent partial rep addition")
         }
         .padding(.horizontal)
     }
@@ -256,8 +372,19 @@ struct TimerView: View {
     private var restBanner: some View {
         HStack {
             Image(systemName: "pause.circle.fill")
-            Text("Resting...")
-                .bold()
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Resting")
+                    .bold()
+                if let remaining = snapshot.restRemaining {
+                    Text(Format.duration(remaining))
+                        .font(.system(.title3, design: .monospaced, weight: .semibold))
+                        .contentTransition(.numericText())
+                }
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Resting")
+            .accessibilityValue(snapshot.restRemaining.map { "\(Int($0)) seconds remaining" } ?? "")
+            .accessibilityAddTraits(.updatesFrequently)
             Spacer()
             Button("Skip Rest") {
                 _ = service?.endRest()
@@ -313,59 +440,106 @@ struct TimerView: View {
 struct WorkoutCompletionSheet: View {
     let workout: Workout
     let snapshot: SessionSnapshot
+    let record: WorkoutRecord?
     let onDismiss: () -> Void
 
     var body: some View {
-        VStack(spacing: 24) {
-            Image(systemName: "trophy.fill")
-                .font(.system(size: 64))
-                .foregroundStyle(.yellow)
-                .padding(.top, 32)
+        ScrollView {
+            VStack(spacing: 20) {
+                Image(systemName: "trophy.fill")
+                    .font(.system(size: 56))
+                    .foregroundStyle(.yellow)
+                    .padding(.top, 24)
 
-            Text("Workout Complete!")
-                .font(.title.bold())
+                Text("Workout Complete!")
+                    .font(.title.bold())
+                    .multilineTextAlignment(.center)
 
-            VStack(spacing: 8) {
-                Text(workout.name)
-                    .font(.title3)
-                    .foregroundStyle(.secondary)
+                if let record {
+                    if record.isPR {
+                        Label("New Personal Record", systemImage: "star.fill")
+                            .font(.headline)
+                            .foregroundStyle(.yellow)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .background(Color.yellow.opacity(0.15))
+                            .clipShape(Capsule())
+                    }
 
-                if workout.mode == .forTime {
-                    Text("\(snapshot.roundsCompleted) Rounds Completed")
-                        .font(.system(size: 32, weight: .bold))
+                    ResultsCardView(record: record, workout: workout)
+                        .padding(.horizontal)
+
+                    ShareLink(
+                        item: renderedCard(record),
+                        preview: SharePreview(
+                            "\(workout.name) — \(record.date.formatted(date: .abbreviated, time: .omitted))",
+                            image: renderedCard(record)
+                        )
+                    ) {
+                        Label("Share Result", systemImage: "square.and.arrow.up")
+                            .font(.headline)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 12)
+                    }
+                    .buttonStyle(.bordered)
+                    .padding(.horizontal)
                 } else {
-                    Text(Format.duration(snapshot.activeElapsed))
-                        .font(.system(size: 40, weight: .heavy, design: .monospaced))
+                    summaryFallback
                 }
 
-                Text("\(snapshot.totalRepsCompleted) Total Reps")
-                    .font(.headline)
-
-                Text("Active Time: \(Format.duration(snapshot.activeElapsed))")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
+                Button {
+                    onDismiss()
+                } label: {
+                    Text("Done")
+                        .font(.headline)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 16)
+                }
+                .buttonStyle(.borderedProminent)
+                .padding(.horizontal)
+                .padding(.bottom, 24)
             }
-            .padding()
-            .frame(maxWidth: .infinity)
-            .background(Color.secondary.opacity(0.1))
-            .clipShape(RoundedRectangle(cornerRadius: 16))
-            .padding(.horizontal)
-
-            Spacer()
-
-            Button {
-                onDismiss()
-            } label: {
-                Text("Done")
-                    .font(.headline)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 16)
-            }
-            .buttonStyle(.borderedProminent)
-            .padding(.horizontal)
-            .padding(.bottom, 24)
         }
-        .presentationDetents([.medium])
+        .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
+    }
+
+    private var summaryFallback: some View {
+        VStack(spacing: 8) {
+            Text(workout.name)
+                .font(.title3)
+                .foregroundStyle(.secondary)
+
+            if workout.mode == .forTime {
+                Text("\(snapshot.roundsCompleted) Rounds Completed")
+                    .font(.system(size: 32, weight: .bold))
+            } else {
+                Text(Format.duration(snapshot.activeElapsed))
+                    .font(.system(size: 40, weight: .heavy, design: .monospaced))
+            }
+
+            Text("\(snapshot.totalRepsCompleted) Total Reps")
+                .font(.headline)
+        }
+        .padding()
+        .frame(maxWidth: .infinity)
+        .background(Color.secondary.opacity(0.1))
+        .clipShape(RoundedRectangle(cornerRadius: 16))
+        .padding(.horizontal)
+    }
+
+    @MainActor
+    private func renderedCard(_ record: WorkoutRecord) -> Image {
+        let renderer = ImageRenderer(
+            content: ResultsCardView(record: record, workout: workout)
+                .frame(width: 320)
+                .padding()
+                .background(Color(.systemBackground))
+        )
+        renderer.scale = 3
+        if let uiImage = renderer.uiImage {
+            return Image(uiImage: uiImage)
+        }
+        return Image(systemName: "photo")
     }
 }

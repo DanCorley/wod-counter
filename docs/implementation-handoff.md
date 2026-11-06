@@ -26,7 +26,7 @@ Build an Apple-native iOS app (SwiftUI + SwiftData) that runs predefined **Girl/
 
 A **free-form task tracker** drives both: every exercise set (exercise × round) is a
 *task* with a remaining-rep count, and the athlete logs reps against **any task in any
-order** using quick counters. Local SwiftData storage + **opt-in iCloud sync**.
+order** using quick counters. Local SwiftData storage. iCloud sync is **deferred to v1.1**; see `docs/tickets/008-cloudkit-sync-decision.md`.
 A results/history view shows windowed stats, per-WOD PRs, progress, and a share card.
 
 Two requirements for the app to meet to be "done":
@@ -50,7 +50,7 @@ Two requirements for the app to meet to be "done":
 - **Predefined library** (Girl / Hero benchmarks): Cindy, Murph, Fran, Angie, Grace, Diane,
   Helen, Dan Tromeau (DT). Expandable — add more by adding seed rows (§ 8).
 - **Custom WODs:** build from a movement catalog; set reps / weight / distance / equipment;
-  choose mode; optional rest between rounds; name it; save (syncs if iCloud on).
+  choose mode; optional rest between rounds; name it; save locally (iCloud sync pending).
 - Murph is seeded **bodyweight-only** (100/200/300). Run-based Murph is supported but deferred.
 
 ### 2.2 Modes
@@ -76,15 +76,23 @@ button exists:
 - **Top-time** ends the session the instant the last task reaches zero total.
 - **Rest between rounds** (Barbara-style): an optional per-block rest; continuous WODs leave it off.
 
-### 2.4 Pause
-- **Pause/Resume** freezes the clock. Paused time is tracked and **subtracted from active time**.
+### 2.4 Pause and session timeline
+- **Pause/Resume** freezes the active clock. Paused time is tracked and **subtracted from active time**.
+- **Timing is derived from `SessionTimeline` timestamps**, not from counting ticker fires:
+  **wall** = finish/now − start (includes pauses), **paused** = accumulated pause intervals,
+  **active** = wall − paused. The one-second ticker only refreshes the snapshot and advances the
+  engine by the real active delta; a delayed or suspended ticker cannot lose elapsed time.
+- `WorkoutRecord.elapsedTime` = wall, `pausedTime` = paused, `activeTime` = active. Pausing freezes
+  the for-time cap while wall time keeps accruing. `TimerView` auto-pauses when the scene leaves
+  `.active`; resuming stays explicit.
 - **Top-time** pauses stop the active clock (reps are the driver, not time); paused time is
   still logged in history but does not reset the rep target.
 
 ### 2.5 Data
-- **SwiftData**, local-first. **iCloud/CloudKit sync is opt-in** via Settings (public database,
-  no account, no server). Pre-rendered `Exercise.displayLabel` ensures identical rendering on
-  every device.
+- **SwiftData**, local-first. **iCloud/CloudKit sync is deferred to v1.1**; the product
+  decision is recorded in `docs/tickets/008-cloudkit-sync-decision.md`. The app is local-only and
+  the fake Settings toggle has been removed. Pre-rendered `Exercise.displayLabel` keeps
+  rendering identical if sync is added later.
 - History: time-window summary (default **1 month**, selectable 7/30/90/all), per-WOD bests,
   PRs, Δ vs. last attempt, a progress chart, and a share card.
 - Out of scope (deferred, do NOT build now): streaks, goals, Apple Watch, Apple Health,
@@ -116,7 +124,7 @@ without a device.
 **Round structure is EXPLICIT** (a `Workout` is an ordered list of `RoundBlock`s), NOT derived:
 - `RoundBlock.exercises`: ordered movements in the block.
 - `RoundBlock.repeatTimes`: `0` = loop until clock (for-time); `N` = play N (top-time); `1` = single pass.
-- `RoundBlock.restAfterBlock`: seconds to rest after the block (nil = continuous).
+- `RoundBlock.restAfterBlock`: seconds to rest after each completed play of this block (nil = continuous). With `repeatTimes > 1` this is rest between rounds, never after the workout's final round. Rest belongs to the completed block, measured in active time.
 - Fran: 3 blocks {thrusters+pull-ups @21}, {…@15}, {…@9}; top-time plays each once → 3 rounds, auto-stop.
 - Cindy: 1 block {5/10/15 bodyweight}, for-time repeat=0 until 20 min.
 - DT: 1 block {12 deadlifts, 9 cleans, 6 push jerks}, repeat=5.
@@ -182,7 +190,7 @@ enum ExecutionMode: String, Codable, CaseIterable, Sendable {
     var weight: String?          // e.g. "95 lb", "225 lb", "53/35 lb"
     var distance: String?        // e.g. "1 mi", "400 m"
     var distanceUnit: String?    // "mi" / "m"
-    var restSeconds: Int?        // inter-set/rest within the scheme (optional)
+    var restSeconds: Int?        // deprecated: per-exercise rest is unsupported; use RoundBlock.restAfterBlock
     var displayLabel: String?    // PRE-RENDERED "21 Thrusters (95 lb)" — the UI shows this verbatim
     init(...) {...}
     var effectiveReps: Int { reps ?? 1 }
@@ -197,7 +205,7 @@ enum ExecutionMode: String, Codable, CaseIterable, Sendable {
     @Relationship(deleteRule: .cascade, inverse: \Exercise.roundBlock) var exercises: [Exercise]
     var workout: Workout?               // inverse of Workout.blocks
     var repeatTimes: Int                 // 0 = loop until clock (for-time); N = play N (top-time); 1 = single pass
-    var restAfterBlock: Int?             // seconds to rest after this block; nil = continuous
+    var restAfterBlock: Int?             // rest after each play of this block; nil = continuous
     init(repeatTimes: Int, restAfterBlock: Int? = nil) {...}
 }
 ```
@@ -525,6 +533,11 @@ final class WorkoutTimerService: Identifiable {
 }
 ```
 
+> **Current timing note (ticket 002):** the real service owns a `SessionTimeline` and a
+> `refresh()`/`syncToNow()` path instead of the `advanceTimeStep(1, active: true)` snippet above.
+> The ticker only triggers a refresh; wall/paused/active time come from injected-clock timestamps.
+> See `WODCounter/Models/Sim/SessionTimeline.swift` and `WorkoutTimerService.swift` for the shipped code.
+
 > **Why `@Observable`, not `ObservableObject`?** The view stores the service in `@State` and
 > must re-render on every 1-second tick and on logReps/pause. An unsubscribed
 > `ObservableObject`/`@Published` object never fans out changes — that exact bug froze the
@@ -620,7 +633,7 @@ struct WindowSummary {
     var workoutsCount: Int
     var prsThisWindow: Int
     var bestRounds: Int
-    var bestTime: TimeInterval   // smallest activeTime (lower is better)
+    var bestTime: TimeInterval?  // smallest activeTime; nil when the window is empty
     var avgActiveTime: TimeInterval
 }
 
@@ -645,7 +658,7 @@ final class ResultsService {
     func summary(for workout: Workout?, window: DateInterval, kind: String?) -> WindowSummary {
         let records = history(for: workout, window: window, kind: kind)
         let prs = records.filter { $0.isPR }
-        let bestTime = records.min(by: { $0.activeTime < $1.activeTime })?.activeTime ?? .greatestFiniteMagnitude
+        let bestTime = records.min(by: { $0.activeTime < $1.activeTime })?.activeTime
         let avg = records.isEmpty ? 0 : records.reduce(0) { $0 + $1.activeTime } / Double(records.count)
         return WindowSummary(workoutsCount: records.count, prsThisWindow: prs.count,
                              bestRounds: records.max(by: { $0.roundsCompleted < $1.roundsCompleted })?.roundsCompleted ?? 0,
@@ -670,6 +683,13 @@ final class ResultsService {
 ```
 
 
+> **Current results note (ticket 006):** `WindowSummary.bestTime` is `TimeInterval?` (no
+> `.greatestFiniteMagnitude` sentinel). Per-WOD delta is **best vs the latest chronological
+> attempt in the selected window** (`WorkoutBestSummary.delta`), not best vs second-best; a
+> single attempt has no delta. `BestSeriesPoint`/`bestSeries(from:mode:)` power the
+> best-over-time chart, and `isPR` is a historical flag (deletes do not recompute it).
+
+
 ---
 
 ## 8. Seed data (built-in WODs)
@@ -678,7 +698,7 @@ final class ResultsService {
 - **Cindy** (Girl, forTime, 20 min, 1 block [5/10/15 bodyweight]).
 - **Murph** (Hero, topTime, nil minutes, 1 block repeat=1 [100/200/300 bodyweight]).
 - **Fran** (topTime, 3 blocks: {21 Thrusters(95 lb)+21 Pull-ups},{15…},{9…}). Thrusters: Barbell,"95 lb",Power.
-- **Angie** (topTime, 1 block single pass [100/100/100/100]).
+- **Angie** (Girl, topTime, 1 block single pass [100/100/100/100]).
 - **Grace** (topTime, 1 block [30 Clean & Jerk (135 lb)] Strength).
 - **Diane** (topTime, 3 blocks: {21 Deadlifts(225)+21 HSPU},{15…},{9…}).
 - **Helen** (topTime, 1 block repeat=3 [400m Run, 21 KB Swings(53/35 lb), 12 Pull-ups]). Run: distance "400 m", unit "m".
@@ -990,18 +1010,27 @@ struct CreateWODView: View {
 import SwiftUI
 
 struct SettingsView: View {
-    @AppStorage("cloudKitEnabled") private var cloudKitEnabled = false
-    @AppStorage("defaultWindow") private var defaultWindow = "30d"
+    @AppStorage(ResultsWindow.storageKey) private var storedWindow = ResultsWindow.defaultValue.rawValue
 
     var body: some View {
         Form {
-            Section("Sync") {
-                Toggle("Sync across my devices (iCloud)", isOn: $cloudKitEnabled)
-                Text("A public iCloud database is used. No account, no server.")
+            Section {
+                HStack {
+                    Text("Storage")
+                    Spacer()
+                    Text("On This Device").foregroundStyle(.secondary)
+                }
+            } header: {
+                Text("Data")
+            } footer: {
+                Text("Workouts and history are stored locally. iCloud sync is not available in this version.")
             }
-            Section("Preferences") {
-                Picker("Default results window", selection: $defaultWindow) {
-                    ForEach(Window.allCases, id: \.self) { Text($0.title) }
+            Section("History Preferences") {
+                Picker("Default Time Window", selection: Binding(
+                    get: { ResultsWindow(storedValue: storedWindow) },
+                    set: { storedWindow = $0.rawValue }
+                )) {
+                    ForEach(ResultsWindow.allCases) { Text($0.settingsLabel).tag($0) }
                 }
             }
         }
@@ -1013,15 +1042,16 @@ struct SettingsView: View {
 
 ---
 
-## 10. iCloud / CloudKit (opt-in)
+## 10. iCloud / CloudKit (not implemented)
 
-- v1 default container: in-memory + persistent (no server).
-- Settings toggle enables/disables CloudKit:
-  - **On:** build `ModelConfiguration(identifier:inMemory:)` with a `ModelConfiguration.CloudKit(configuration:)` using a **public** database; sync without a user account.
-  - **Off:** `ModelConfiguration(for: schemas, isStoredInMemoryOnly: false)`.
-- CloudKit descriptor must set sensible **default values** so records sync without fields being empty.
+- **v1 is local-only:** `Container.local()` always builds a persistent local
+  `ModelConfiguration`; no CloudKit entitlement or container identifier exists.
+- The fake Settings toggle has been removed. Settings shows local storage only.
+- The v1 decision is **defer sync to v1.1**; Option B (private CloudKit) remains documented in
+  `docs/tickets/008-cloudkit-sync-decision.md`. Do not describe sync as working or use a public
+  database for workout history. `Exercise.displayLabel` pre-rendering is retained so rendered UI
+  stays identical if sync is added later.
 - No accounts, no server, no third-party SDKs.
-- `displayLabel` pre-rendering is what keeps rendered UI identical across synced devices.
 
 ---
 
@@ -1051,7 +1081,7 @@ struct SettingsView: View {
 
 - Apple-native iOS only; **iOS 17.0** minimum.
 - **SwiftUI + SwiftData + Swift Concurrency**.
-- Offline-first; workout data never leaves device. **iCloud opt-in** (public CloudKit DB, no account/server).
+- Offline-first; workout data never leaves the device in v1. **iCloud sync is deferred to v1.1**; see `docs/tickets/008-cloudkit-sync-decision.md`.
 - Pre-rendered `displayLabel`; UI never reformats weight/reps/distance.
 - Distanced-only exercises (no `reps`) → effective rep quota **1**; `displayLabel` carries distance.
 - Murph seed = bodyweight-only 100/200/300.

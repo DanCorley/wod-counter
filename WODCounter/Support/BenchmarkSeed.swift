@@ -23,7 +23,7 @@ enum BenchmarkSeed {
             makeExercise(movement: squats, reps: 15, displayLabel: "15 Air Squats", in: context),
         ]
 
-        workout.blocks = [block]
+        workout.blocks = assignOrder([block])
         return workout
     }
 
@@ -47,7 +47,7 @@ enum BenchmarkSeed {
             makeExercise(movement: squats, reps: 300, displayLabel: "300 Air Squats", in: context),
         ]
 
-        workout.blocks = [block]
+        workout.blocks = assignOrder([block])
         return workout
     }
 
@@ -81,7 +81,7 @@ enum BenchmarkSeed {
             makeExercise(movement: pullUps, reps: 9, displayLabel: "9 Pull-ups", in: context),
         ]
 
-        workout.blocks = [block21, block15, block9]
+        workout.blocks = assignOrder([block21, block15, block9])
         return workout
     }
 
@@ -107,7 +107,7 @@ enum BenchmarkSeed {
             makeExercise(movement: squats, reps: 100, displayLabel: "100 Air Squats", in: context),
         ]
 
-        workout.blocks = [block]
+        workout.blocks = assignOrder([block])
         return workout
     }
 
@@ -127,7 +127,7 @@ enum BenchmarkSeed {
             makeExercise(movement: cleanJerk, reps: 30, weight: "135 lb", displayLabel: "30 Clean & Jerk (135 lb)", in: context),
         ]
 
-        workout.blocks = [block]
+        workout.blocks = assignOrder([block])
         return workout
     }
 
@@ -161,7 +161,7 @@ enum BenchmarkSeed {
             makeExercise(movement: hspu, reps: 9, displayLabel: "9 Handstand Push-ups", in: context),
         ]
 
-        workout.blocks = [block21, block15, block9]
+        workout.blocks = assignOrder([block21, block15, block9])
         return workout
     }
 
@@ -185,7 +185,7 @@ enum BenchmarkSeed {
             makeExercise(movement: pullUps, reps: 12, displayLabel: "12 Pull-ups", in: context),
         ]
 
-        workout.blocks = [block]
+        workout.blocks = assignOrder([block])
         return workout
     }
 
@@ -209,8 +209,22 @@ enum BenchmarkSeed {
             makeExercise(movement: pushJerks, reps: 6, weight: "155 lb", displayLabel: "6 Push Jerks (155 lb)", in: context),
         ]
 
-        workout.blocks = [block]
+        workout.blocks = assignOrder([block])
         return workout
+    }
+
+    /// Assigns explicit, sequential sort order to every block and exercise.
+    /// Seeded workouts always use this so their order is persisted rather than
+    /// depending on SwiftData's to-many array order.
+    @discardableResult
+    private static func assignOrder(_ blocks: [RoundBlock]) -> [RoundBlock] {
+        for (blockIndex, block) in blocks.enumerated() {
+            block.sortOrder = blockIndex
+            for (exerciseIndex, exercise) in block.exercises.enumerated() {
+                exercise.sortOrder = exerciseIndex
+            }
+        }
+        return blocks
     }
 
     private static func makeMovement(name: String, equipment: String?, category: String?,

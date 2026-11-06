@@ -1,5 +1,11 @@
 # Task 5 — `WorkoutTimerService` (clock + pause/active-time + persist on finish)
 
+> **Historical contract.** The shipped service is `@Observable` (not `ObservableObject`), logs
+> reps by task ID (`logReps(taskID:count:)`, not `advanceRep()`), and derives timing from
+> `SessionTimeline` timestamps. The one-second ticker only refreshes/advances; it is **not**
+> the time source. See [handoff §7](../../../implementation-handoff.md#7-services) and
+> [ticket 002](../../../tickets/002-session-clock-and-pause.md).
+
 **Deliverable:** The service that bridges the pure `WODSimulator` to the real clock and persistence — drives the ticking timer, honors pause/resume, evaluates PRs via `ResultsService`, and writes a `WorkoutRecord` when the session ends.
 
 ## Pointers

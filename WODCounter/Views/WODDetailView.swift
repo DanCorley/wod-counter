@@ -8,6 +8,7 @@ struct WODDetailView: View {
 
     let workout: Workout
     @State private var isStartingWorkout = false
+    @State private var isShowingEdit = false
 
     var body: some View {
         Form {
@@ -43,6 +44,22 @@ struct WODDetailView: View {
                 WorkoutSchemeView(workout: workout, isCompact: false)
             }
 
+            if !workout.records.isEmpty {
+                Section("History") {
+                    NavigationLink {
+                        WODAttemptsView(workout: workout, window: .allTime)
+                    } label: {
+                        HStack {
+                            Label("View Results", systemImage: "chart.bar.xaxis")
+                            Spacer()
+                            Text("\(workout.records.count) attempt\(workout.records.count == 1 ? "" : "s")")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+
             Section {
                 Button {
                     appModel?.startWorkout(workout)
@@ -76,6 +93,20 @@ struct WODDetailView: View {
         }
         .navigationTitle(workout.name)
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            if !workout.isBuiltin {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Edit") {
+                        isShowingEdit = true
+                    }
+                }
+            }
+        }
+        .sheet(isPresented: $isShowingEdit) {
+            NavigationStack {
+                CreateWODView(editingWorkout: workout)
+            }
+        }
         .fullScreenCover(isPresented: $isStartingWorkout) {
             TimerView(workout: workout)
         }

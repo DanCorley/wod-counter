@@ -1,5 +1,12 @@
 # Task 3 — `WODSimulator` (pure progression engine)
 
+> **Historical contract.** The shipped engine is a **free-form task tracker**: reps are
+> logged against task IDs via `completeReps(taskID:count:)`, repeated blocks are pre-expanded
+> into per-round tasks, and AMRAP rounds regenerate. The `advanceRep`/`playTarget`/
+> `blockIndex`/`exerciseIndex` API below is the superseded design. See
+> [handoff §6](../../../implementation-handoff.md#6-pure-engine-workoutsimulator-do-this-first-highest-test-value)
+> and [ticket 005](../../../tickets/005-rest-semantics.md) for current behavior.
+
 **Deliverable:** A pure, dependency-free, deterministic WOD progression engine — independent of SwiftData, the clock, and UI. This is the highest-value, most-tested part of the app.
 
 ## Pointers

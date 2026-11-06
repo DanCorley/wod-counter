@@ -1,5 +1,12 @@
 # Per-task agent briefs — WOD Round Counter
 
+> **Historical task record — not current design.** These briefs describe the original
+> sequential per-rep plan. The shipped app uses a **free-form task tracker** (see the
+> [spec](../../specs/2026-09-11-wod-counter-design.md) and
+> [handoff](../../../implementation-handoff.md)). Step-level contracts in these files can be
+> stale; Task 3 in particular is historical. For live work items see
+> [docs/tickets/](../../../tickets/README.md).
+
 Each file here is a **self-contained brief for one implementation task**, meant to be handed
 to a single agent that works one task at a time. Read the tasks in order.
 

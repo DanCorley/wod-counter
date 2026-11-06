@@ -1,5 +1,9 @@
 # Task 8 — View: Results & Share Card
 
+> **Historical claims.** Current delta is **best vs the latest chronological attempt**, an
+> empty `bestTime` is optional, and the drill-down chart is best-over-time. See
+> [ticket 006](../../../tickets/006-results-correctness.md).
+
 **Deliverable:** The history/results screen (windowed summary, per-WOD bests with Δ vs. last, best-over-time chart) and a shareable results card (`ResultsCardView`).
 
 ## Pointers

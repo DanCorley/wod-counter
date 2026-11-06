@@ -1,5 +1,10 @@
 # Task 6 — Views: Home, WOD Detail, Settings
 
+> **Historical claims.** The iCloud toggle in Settings is a non-functional placeholder;
+> sync is **not implemented** (decision pending in
+> [ticket 008](../../../tickets/008-cloudkit-sync-decision.md)). History navigation and
+> detail-screen extras shipped through [ticket 010](../../../tickets/010-timer-ux-and-completion.md).
+
 **Deliverable:** The WOD library (grouped Girl/Hero + Custom), a WOD detail screen (Start, History), and Settings (iCloud toggle, default window).
 
 ## Pointers

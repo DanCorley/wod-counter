@@ -1,5 +1,11 @@
 # Task 4 — `ResultsService` & Formatters (windowed stats + PR detection)
 
+> **Historical API.** The shipped `ResultsService` differs: `WindowSummary.bestTime` is
+> optional, delta is **best vs the latest chronological attempt**, and helpers
+> (`WorkoutBestSummary`, `BestSeriesPoint`, static `filter`/`summary`) replace the older
+> fetch-per-workout shape. See [handoff §7](../../../implementation-handoff.md#7-services) and
+> [ticket 006](../../../tickets/006-results-correctness.md).
+
 **Deliverable:** Pure functions over SwiftData to compute per-workout history, PRs, and window summaries, plus shared duration and timer formatters.
 
 ## Pointers

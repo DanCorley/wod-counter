@@ -1,5 +1,11 @@
 # Task 7 — View: Timer
 
+> **Historical contract.** Both modes count **up** in the shipped timer; for-time shows a
+> time-cap label rather than counting down. The counter is a grouped free-form task list with
+> quick counters, not a per-exercise cycling counter, and completion uses a sheet. See
+> [handoff §9](../../../implementation-handoff.md#9-views) and
+> [ticket 010](../../../tickets/010-timer-ux-and-completion.md).
+
 **Deliverable:** The live timer screen — big clock, per-exercise cycling counter, Pause/Resume, Finish (top-time), and a results overlay on completion.
 
 ## Pointers
@@ -13,7 +19,7 @@
 
 ## Global constraints (verbatim)
 - iOS, Apple-native, **iOS 17.0**. SwiftUI only. **TDD:** end green, commit once, no placeholders.
-- For-time: clock counts **down** from minutes; record = **rounds**. Top-time: clock counts **up** (active time); **Finish** button; record = elapsed active time.
+- **Historical:** for-time was planned to count **down**; the shipped timer counts **up** for both modes and shows a time-cap label. Top-time records elapsed active time.
 
 ## Files
 - **Create:** `WODCounter/Views/TimerView.swift`
