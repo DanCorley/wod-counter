@@ -113,7 +113,7 @@ final class WODSimulatorTests: XCTestCase {
         let fran = BenchmarkSeed.fran(in: context)
         var sim = WODSimulator(workout: fran)
 
-        XCTAssertEqual(fran.blocks.count, 3)
+        XCTAssertEqual(fran.orderedBlocks.count, 3)
         XCTAssertEqual(sim.totalRounds, 3)
         XCTAssertEqual(sim.totalRemaining, 90)
 
@@ -142,6 +142,48 @@ final class WODSimulatorTests: XCTestCase {
         XCTAssertEqual(sim.roundsCompleted, 3)
         XCTAssertEqual(sim.phase, .finished)
         XCTAssertEqual(sim.totalRepsCompleted, 90)
+    }
+
+    // MARK: - Multi-Block Explicit Ordering (Fran/Diane)
+
+    @MainActor
+    func testMultiBlockWorkoutsFollowExplicitOrder() {
+        let cases: [(Workout, [String])] = [
+            (BenchmarkSeed.fran(in: context), [
+                "21 Thrusters (95 lb)", "21 Pull-ups",
+                "15 Thrusters (95 lb)", "15 Pull-ups",
+                "9 Thrusters (95 lb)", "9 Pull-ups",
+            ]),
+            (BenchmarkSeed.diane(in: context), [
+                "21 Deadlifts (225 lb)", "21 Handstand Push-ups",
+                "15 Deadlifts (225 lb)", "15 Handstand Push-ups",
+                "9 Deadlifts (225 lb)", "9 Handstand Push-ups",
+            ]),
+        ]
+
+        for (workout, expectedLabels) in cases {
+            var sim = WODSimulator(workout: workout)
+            XCTAssertEqual(sim.liveTasks.map(\.displayLabel), expectedLabels,
+                           "\(workout.name) tasks should follow block/exercise sortOrder")
+            XCTAssertEqual(sim.totalRounds, 3)
+
+            sim.start()
+            var completionOrder: [Int] = []
+            for task in sim.liveTasks {
+                let event = sim.completeReps(taskID: task.id, count: task.remaining)
+                switch event {
+                case .blockCompleted:
+                    completionOrder.append(sim.roundsCompleted)
+                case .finished:
+                    completionOrder.append(sim.roundsCompleted)
+                case .none:
+                    break
+                }
+            }
+
+            XCTAssertEqual(completionOrder, [1, 2, 3],
+                           "\(workout.name) blocks should complete 21 -> 15 -> 9")
+        }
     }
 
     // MARK: - DT (Single-Block Repeat: 5 Rounds, per-round sets)
@@ -262,6 +304,220 @@ final class WODSimulatorTests: XCTestCase {
         XCTAssertEqual(event, .finished(.manual))
         XCTAssertEqual(sim.phase, .finished)
         XCTAssertEqual(sim.snapshot.isFinished, true)
+    }
+
+    // MARK: - Rest Semantics (WTB-005)
+
+    /// Builds a top-time workout with one exercise per block. Each block's
+    /// single task has quota 10, so completing it completes the round.
+    @MainActor
+    private func makeBlocksWorkout(_ specs: [(repeatTimes: Int, rest: Int?)]) -> Workout {
+        let workout = Workout(
+            name: "Rest Test \(UUID().uuidString)",
+            mode: .topTime,
+            isBuiltin: false
+        )
+        let movement = Movement(name: "Squat-\(UUID().uuidString)")
+        context.insert(movement)
+        workout.blocks = specs.enumerated().map { index, spec in
+            let block = RoundBlock(
+                repeatTimes: spec.repeatTimes,
+                restAfterBlock: spec.rest,
+                sortOrder: index
+            )
+            let exercise = Exercise(
+                movement: movement,
+                reps: 10,
+                displayLabel: "10 Squats B\(index)",
+                sortOrder: 0
+            )
+            context.insert(exercise)
+            block.exercises = [exercise]
+            return block
+        }
+        context.insert(workout)
+        return workout
+    }
+
+    @MainActor
+    @discardableResult
+    private func completeFirstIncompleteRound(in sim: inout WODSimulator) -> TimerEvent {
+        let task = sim.liveTasks.first { !$0.isComplete }!
+        return sim.completeReps(taskID: task.id, count: task.remaining)
+    }
+
+    @MainActor
+    func testRestOnFirstBlockFiresAfterThatBlock() {
+        let workout = makeBlocksWorkout([(1, 60), (1, nil)])
+        var sim = WODSimulator(workout: workout)
+        sim.start()
+
+        XCTAssertEqual(completeFirstIncompleteRound(in: &sim), .blockCompleted)
+        XCTAssertEqual(sim.phase, .resting)
+        XCTAssertEqual(sim.restDeadline, 60)
+
+        // Reps are ignored while resting.
+        let next = sim.liveTasks.first { !$0.isComplete }!
+        XCTAssertEqual(sim.completeReps(taskID: next.id, count: 10), .none)
+
+        _ = sim.endRest()
+        XCTAssertEqual(sim.phase, .running)
+        XCTAssertEqual(sim.completeReps(taskID: next.id, count: 10), .finished(.goalReached))
+        XCTAssertEqual(sim.phase, .finished)
+    }
+
+    @MainActor
+    func testRestOnSecondBlockDoesNotFireAfterFirstBlock() {
+        let workout = makeBlocksWorkout([(1, nil), (1, 60)])
+        var sim = WODSimulator(workout: workout)
+        sim.start()
+
+        XCTAssertEqual(completeFirstIncompleteRound(in: &sim), .blockCompleted)
+        XCTAssertEqual(sim.phase, .running)
+        XCTAssertNil(sim.restDeadline)
+
+        // The final block's rest never fires because the workout finishes.
+        XCTAssertEqual(completeFirstIncompleteRound(in: &sim), .finished(.goalReached))
+        XCTAssertEqual(sim.phase, .finished)
+        XCTAssertNil(sim.restDeadline)
+    }
+
+    @MainActor
+    func testRestOnMiddleBlockFiresAfterThatBlock() {
+        let workout = makeBlocksWorkout([(1, nil), (1, 45), (1, nil)])
+        var sim = WODSimulator(workout: workout)
+        sim.start()
+
+        XCTAssertEqual(completeFirstIncompleteRound(in: &sim), .blockCompleted)
+        XCTAssertEqual(sim.phase, .running)
+
+        XCTAssertEqual(completeFirstIncompleteRound(in: &sim), .blockCompleted)
+        XCTAssertEqual(sim.phase, .resting)
+        XCTAssertEqual(sim.restDeadline, 45)
+
+        _ = sim.endRest()
+        XCTAssertEqual(completeFirstIncompleteRound(in: &sim), .finished(.goalReached))
+        XCTAssertNil(sim.restDeadline)
+    }
+
+    @MainActor
+    func testRepeatedBlockRestsBetweenRoundsButNotAfterFinalRound() {
+        let workout = makeBlocksWorkout([(3, 180)])
+        var sim = WODSimulator(workout: workout)
+        sim.start()
+
+        for _ in 1...2 {
+            XCTAssertEqual(completeFirstIncompleteRound(in: &sim), .blockCompleted)
+            XCTAssertEqual(sim.phase, .resting)
+            XCTAssertEqual(sim.restDeadline, sim.resultActiveTime + 180)
+            _ = sim.endRest()
+        }
+
+        XCTAssertEqual(completeFirstIncompleteRound(in: &sim), .finished(.goalReached))
+        XCTAssertEqual(sim.phase, .finished)
+        XCTAssertNil(sim.restDeadline)
+    }
+
+    @MainActor
+    func testPauseDuringRestPreservesRemainingRest() {
+        let workout = makeBlocksWorkout([(2, 60)])
+        var sim = WODSimulator(workout: workout)
+        sim.start()
+
+        XCTAssertEqual(completeFirstIncompleteRound(in: &sim), .blockCompleted)
+        XCTAssertEqual(sim.phase, .resting)
+
+        sim.advanceTime(20, active: true)
+        XCTAssertEqual(sim.phase, .resting)
+        XCTAssertEqual(sim.resultActiveTime, 20)
+
+        sim.pause()
+        sim.advanceTime(30, active: false)
+        XCTAssertEqual(sim.phase, .paused)
+        XCTAssertEqual(sim.resultActiveTime, 20)
+        XCTAssertEqual(sim.restDeadline, 60)
+
+        sim.resume()
+        XCTAssertEqual(sim.phase, .resting)
+        sim.advanceTime(39, active: true)
+        XCTAssertEqual(sim.phase, .resting)
+        XCTAssertEqual(sim.resultActiveTime, 59)
+
+        sim.advanceTime(1, active: true)
+        XCTAssertEqual(sim.phase, .running)
+        XCTAssertNil(sim.restDeadline)
+    }
+
+    @MainActor
+    func testEndRestSkipsRemainingRestAndResumesRunning() {
+        let workout = makeBlocksWorkout([(2, 60)])
+        var sim = WODSimulator(workout: workout)
+        sim.start()
+
+        XCTAssertEqual(completeFirstIncompleteRound(in: &sim), .blockCompleted)
+        XCTAssertEqual(sim.phase, .resting)
+
+        sim.pause()
+        XCTAssertEqual(sim.phase, .paused)
+        _ = sim.endRest()
+        XCTAssertEqual(sim.phase, .running)
+        XCTAssertNil(sim.restDeadline)
+    }
+
+    @MainActor
+    func testManualStartRestUsesCompletedBlockRest() {
+        let workout = makeBlocksWorkout([(1, 45), (1, nil)])
+        var sim = WODSimulator(workout: workout)
+        sim.start()
+
+        XCTAssertEqual(completeFirstIncompleteRound(in: &sim), .blockCompleted)
+        _ = sim.endRest()
+
+        _ = sim.startRest()
+        XCTAssertEqual(sim.phase, .resting)
+        XCTAssertEqual(sim.restDeadline, sim.resultActiveTime + 45)
+    }
+
+    @MainActor
+    func testRestRemainingCountsDownAndIgnoresPausedTime() {
+        let workout = makeBlocksWorkout([(2, 60)])
+        var sim = WODSimulator(workout: workout)
+        sim.start()
+
+        XCTAssertNil(sim.snapshot.restRemaining)
+
+        XCTAssertEqual(completeFirstIncompleteRound(in: &sim), .blockCompleted)
+        XCTAssertEqual(sim.snapshot.restRemaining, 60)
+
+        sim.advanceTime(20, active: true)
+        XCTAssertEqual(sim.snapshot.restRemaining, 40)
+
+        // Paused time does not consume rest.
+        sim.pause()
+        sim.advanceTime(30, active: false)
+        XCTAssertEqual(sim.snapshot.restRemaining, 40)
+
+        sim.resume()
+        sim.advanceTime(40, active: true)
+        XCTAssertEqual(sim.phase, .running)
+        XCTAssertNil(sim.snapshot.restRemaining)
+    }
+
+    @MainActor
+    func testRemoveRepsReversesPartialAdditionOnly() {
+        let workout = makeBlocksWorkout([(2, 10)])
+        var sim = WODSimulator(workout: workout)
+        sim.start()
+
+        let task = sim.liveTasks.first { !$0.isComplete }!
+
+        XCTAssertEqual(sim.completeReps(taskID: task.id, count: 5), .none)
+        XCTAssertEqual(sim.totalRepsCompleted, 5)
+        XCTAssertEqual(sim.totalRemaining, 15)
+
+        XCTAssertEqual(sim.removeReps(taskID: task.id, count: 5), 5)
+        XCTAssertEqual(sim.totalRepsCompleted, 0)
+        XCTAssertEqual(sim.totalRemaining, 20)
     }
 
     // MARK: - Idle Snapshot

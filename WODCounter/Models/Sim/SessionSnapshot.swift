@@ -10,11 +10,16 @@ struct SessionSnapshot: Equatable, Sendable {
     var totalRemaining: Int
     var wallClock: TimeInterval
     var activeElapsed: TimeInterval
+    /// Seconds left in the current rest, measured against active time. `nil`
+    /// when no rest is pending (including while paused mid-rest-free sessions).
+    var restRemaining: TimeInterval?
     var isPaused: Bool
     var isFinished: Bool
 
     var isRunning: Bool { phase == .running }
     var shouldShowResults: Bool { phase == .finished }
+    /// A session in progress that should not be dismissed without confirmation.
+    var isLive: Bool { phase == .running || phase == .paused || phase == .resting }
 }
 
 extension SessionSnapshot {
@@ -29,6 +34,7 @@ extension SessionSnapshot {
             totalRemaining: 0,
             wallClock: 0,
             activeElapsed: 0,
+            restRemaining: nil,
             isPaused: false,
             isFinished: false
         )
