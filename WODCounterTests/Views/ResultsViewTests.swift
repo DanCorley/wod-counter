@@ -35,7 +35,7 @@ struct ResultsViewTests {
         return record
     }
 
-    private func makeWorkout(context: ModelContext, mode: ExecutionMode = .forTime) -> Workout {
+    private func makeWorkout(context: ModelContext, name: String = "Test WOD", mode: ExecutionMode = .forTime) -> Workout {
         let movement = Movement(name: "Air Squat", equipment: nil, category: "Gymnastics", iconName: nil)
         context.insert(movement)
         let exercise = Exercise(movement: movement, reps: 15, displayLabel: "15 Air Squats")
@@ -44,7 +44,7 @@ struct ResultsViewTests {
         block.exercises = [exercise]
         context.insert(block)
         let workout = Workout(
-            name: "Test WOD",
+            name: name,
             workoutDescription: nil,
             category: "Girl",
             mode: mode,
@@ -169,46 +169,191 @@ struct ResultsViewTests {
         #expect(best?.activeTime == 450)
     }
 
-    // MARK: - Delta Computation
+    // MARK: - Delta Computation (best vs latest attempt)
 
-    @Test func deltaForTimePositive() throws {
+    @Test func forTimeLatestWorseThanBestShowsRegression() throws {
         let container = Container.inMemory()
         let context = ModelContext(container)
         let service = ResultsService(context: context)
         let workout = makeWorkout(context: context, mode: .forTime)
 
-        let r1 = insertRecord(workout: workout, context: context, daysAgo: 5, rounds: 10, activeTime: 600)
-        let r2 = insertRecord(workout: workout, context: context, daysAgo: 1, rounds: 13, activeTime: 580)
+        insertRecord(workout: workout, context: context, daysAgo: 10, rounds: 15, activeTime: 600)
+        insertRecord(workout: workout, context: context, daysAgo: 5, rounds: 18, activeTime: 580) // best
+        insertRecord(workout: workout, context: context, daysAgo: 1, rounds: 14, activeTime: 590) // latest, worse
 
         let records = service.history(for: workout, window: nil)
-        let best = records.max(by: { $0.roundsCompleted < $1.roundsCompleted })
-        let others = records.filter { $0.id != best?.id }
-        let prevBest = others.max(by: { $0.roundsCompleted < $1.roundsCompleted })
+        let summary = try #require(ResultsService.bestSummaries(from: records).first)
 
-        #expect(best?.id == r2.id)
-        #expect(prevBest?.id == r1.id)
-        #expect((best?.roundsCompleted ?? 0) - (prevBest?.roundsCompleted ?? 0) == 3)
+        #expect(summary.bestValue == 18)
+        #expect(summary.latestValue == 14)
+        #expect(summary.delta == .regressed(amount: 4))
+        #expect(summary.deltaText == "−4 rds")
     }
 
-    @Test func deltaTopTimeNegativeIsImprovement() throws {
+    @Test func topTimeLatestWorseThanBestShowsRegression() throws {
         let container = Container.inMemory()
         let context = ModelContext(container)
         let service = ResultsService(context: context)
         let workout = makeWorkout(context: context, mode: .topTime)
 
-        let r1 = insertRecord(workout: workout, context: context, daysAgo: 5, rounds: 1, activeTime: 700)
-        let r2 = insertRecord(workout: workout, context: context, daysAgo: 1, rounds: 1, activeTime: 550)
+        insertRecord(workout: workout, context: context, daysAgo: 10, rounds: 1, activeTime: 400)
+        insertRecord(workout: workout, context: context, daysAgo: 5, rounds: 1, activeTime: 300) // best
+        insertRecord(workout: workout, context: context, daysAgo: 1, rounds: 1, activeTime: 350) // latest, slower
 
         let records = service.history(for: workout, window: nil)
-        let best = records.min(by: { $0.activeTime < $1.activeTime })
-        let others = records.filter { $0.id != best?.id }
-        let prevBest = others.min(by: { $0.activeTime < $1.activeTime })
+        let summary = try #require(ResultsService.bestSummaries(from: records).first)
 
-        #expect(best?.id == r2.id)
-        #expect(prevBest?.id == r1.id)
-        // Δ = prevBest.activeTime - best.activeTime (positive means improvement)
-        let delta = (prevBest?.activeTime ?? 0) - (best?.activeTime ?? 0)
-        #expect(delta == 150)
+        #expect(summary.bestValue == 300)
+        #expect(summary.latestValue == 350)
+        #expect(summary.delta == .regressed(amount: 50))
+        #expect(summary.deltaText == "+00:50")
+    }
+
+    @Test func latestAttemptEqualToBestShowsEquals() throws {
+        let container = Container.inMemory()
+        let context = ModelContext(container)
+        let service = ResultsService(context: context)
+        let workout = makeWorkout(context: context, mode: .forTime)
+
+        insertRecord(workout: workout, context: context, daysAgo: 10, rounds: 10, activeTime: 600)
+        insertRecord(workout: workout, context: context, daysAgo: 5, rounds: 12, activeTime: 590)
+        insertRecord(workout: workout, context: context, daysAgo: 1, rounds: 12, activeTime: 580) // ties best
+
+        let records = service.history(for: workout, window: nil)
+        let summary = try #require(ResultsService.bestSummaries(from: records).first)
+
+        #expect(summary.bestValue == 12)
+        #expect(summary.latestValue == 12)
+        #expect(summary.delta == .equal)
+        #expect(summary.deltaText == "=")
+    }
+
+    @Test func singleAttemptHasNoDelta() throws {
+        let container = Container.inMemory()
+        let context = ModelContext(container)
+        let service = ResultsService(context: context)
+        let workout = makeWorkout(context: context, mode: .topTime)
+
+        insertRecord(workout: workout, context: context, daysAgo: 1, rounds: 1, activeTime: 400)
+
+        let records = service.history(for: workout, window: nil)
+        let summary = try #require(ResultsService.bestSummaries(from: records).first)
+
+        #expect(summary.attemptCount == 1)
+        #expect(summary.delta == nil)
+        #expect(summary.deltaText == nil)
+    }
+
+    // MARK: - Grouping and Refresh
+
+    @Test func multipleWorkoutsAreGroupedIntoOneSummaryEach() throws {
+        let container = Container.inMemory()
+        let context = ModelContext(container)
+        let service = ResultsService(context: context)
+        let cindy = makeWorkout(context: context, name: "Cindy", mode: .forTime)
+        let fran = makeWorkout(context: context, name: "Fran", mode: .topTime)
+
+        insertRecord(workout: cindy, context: context, daysAgo: 10, rounds: 12, activeTime: 600)
+        insertRecord(workout: cindy, context: context, daysAgo: 5, rounds: 15, activeTime: 590)
+        insertRecord(workout: fran, context: context, daysAgo: 4, rounds: 1, activeTime: 300)
+        insertRecord(workout: fran, context: context, daysAgo: 2, rounds: 1, activeTime: 320)
+        insertRecord(workout: fran, context: context, daysAgo: 1, rounds: 1, activeTime: 330)
+
+        let records = service.history(for: nil, window: nil)
+        let summaries = ResultsService.bestSummaries(from: records)
+
+        #expect(summaries.count == 2)
+        #expect(summaries.map(\.workoutName) == ["Cindy", "Fran"])
+
+        let cindySummary = try #require(summaries.first { $0.workoutName == "Cindy" })
+        #expect(cindySummary.attemptCount == 2)
+        #expect(cindySummary.bestValue == 15)
+        #expect(cindySummary.delta == .equal) // latest is also the best
+
+        let franSummary = try #require(summaries.first { $0.workoutName == "Fran" })
+        #expect(franSummary.attemptCount == 3)
+        #expect(franSummary.bestValue == 300)
+        #expect(franSummary.delta == .regressed(amount: 30))
+    }
+
+    @Test func newRecordIsVisibleAfterRefetch() throws {
+        let container = Container.inMemory()
+        let context = ModelContext(container)
+        let workout = makeWorkout(context: context, mode: .forTime)
+
+        insertRecord(workout: workout, context: context, daysAgo: 5, rounds: 10, activeTime: 600)
+        try context.save()
+
+        // Simulates the initial @Query fetch.
+        let initial = try context.fetch(FetchDescriptor<WorkoutRecord>())
+        #expect(ResultsService.bestSummaries(from: initial).first?.attemptCount == 1)
+
+        insertRecord(workout: workout, context: context, daysAgo: 1, rounds: 12, activeTime: 580)
+        try context.save()
+
+        // Simulates the next @Query update after the insert.
+        let refreshed = try context.fetch(FetchDescriptor<WorkoutRecord>())
+        let summary = try #require(ResultsService.bestSummaries(from: refreshed).first)
+
+        #expect(summary.attemptCount == 2)
+        #expect(summary.bestValue == 12)
+        #expect(summary.latestValue == 12)
+        #expect(summary.delta == .equal)
+    }
+
+    // MARK: - Best-over-time Chart Data
+
+    @Test func bestSeriesOnlyIncludesNewBests() throws {
+        let container = Container.inMemory()
+        let context = ModelContext(container)
+        let service = ResultsService(context: context)
+        let workout = makeWorkout(context: context, mode: .forTime)
+
+        insertRecord(workout: workout, context: context, daysAgo: 10, rounds: 10, activeTime: 600)
+        insertRecord(workout: workout, context: context, daysAgo: 8, rounds: 12, activeTime: 590)
+        insertRecord(workout: workout, context: context, daysAgo: 6, rounds: 11, activeTime: 580) // not a best
+        insertRecord(workout: workout, context: context, daysAgo: 4, rounds: 14, activeTime: 570)
+        insertRecord(workout: workout, context: context, daysAgo: 1, rounds: 9, activeTime: 560) // not a best
+
+        let records = service.history(for: workout, window: nil)
+        let points = ResultsService.bestSeries(from: records, mode: workout.mode)
+
+        #expect(points.map(\.value) == [10, 12, 14])
+        #expect(points.map(\.date) == points.map(\.date).sorted())
+    }
+
+    // MARK: - Empty Window and PR History
+
+    @Test func emptyWindowHasNoBestTimeSentinel() throws {
+        let container = Container.inMemory()
+        let context = ModelContext(container)
+        let service = ResultsService(context: context)
+
+        let summary = service.summary(window: ResultsWindow.thirtyDays.dateInterval)
+
+        #expect(summary.workoutsCount == 0)
+        #expect(summary.bestTime == nil)
+    }
+
+    @Test func deletingPRRecordDoesNotPromoteHistoricalFlag() throws {
+        let container = Container.inMemory()
+        let context = ModelContext(container)
+        let service = ResultsService(context: context)
+        let workout = makeWorkout(context: context, mode: .forTime)
+
+        insertRecord(workout: workout, context: context, daysAgo: 10, rounds: 10, activeTime: 600, isPR: true)
+        insertRecord(workout: workout, context: context, daysAgo: 5, rounds: 8, activeTime: 580, isPR: false)
+        try context.save()
+
+        let allRecords = service.history(for: workout, window: nil)
+        let prRecord = try #require(allRecords.first { $0.isPR })
+        context.delete(prRecord)
+        try context.save()
+
+        let remaining = service.history(for: workout, window: nil)
+        #expect(remaining.count == 1)
+        #expect(remaining[0].isPR == false)
+        #expect(ResultsService.summary(from: remaining).prsThisWindow == 0)
     }
 
     // MARK: - ResultsWindow
@@ -228,5 +373,40 @@ struct ResultsViewTests {
         #expect(interval != nil)
         let days = interval!.duration / 86400
         #expect(days >= 6.9 && days <= 7.1)
+    }
+
+    // MARK: - Shared Default Window
+
+    @Test func sharedStorageKeyAndDefaultAreStable() {
+        #expect(ResultsWindow.storageKey == "defaultResultsWindow")
+        #expect(ResultsWindow.defaultValue == .thirtyDays)
+    }
+
+    @Test func allWindowsRoundTripThroughSharedStorageKey() throws {
+        let suiteName = "ResultsWindowTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        #expect(ResultsWindow.allCases.count == 4)
+
+        for window in ResultsWindow.allCases {
+            defaults.set(window.rawValue, forKey: ResultsWindow.storageKey)
+            let stored = defaults.string(forKey: ResultsWindow.storageKey)
+            #expect(ResultsWindow(storedValue: stored) == window)
+        }
+    }
+
+    @Test func invalidStoredWindowFallsBackToThirtyDays() throws {
+        let suiteName = "ResultsWindowTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        #expect(ResultsWindow(storedValue: nil) == .thirtyDays)
+
+        defaults.set("not-a-window", forKey: ResultsWindow.storageKey)
+        #expect(ResultsWindow(storedValue: defaults.string(forKey: ResultsWindow.storageKey)) == .thirtyDays)
+
+        defaults.removeObject(forKey: ResultsWindow.storageKey)
+        #expect(ResultsWindow(storedValue: defaults.string(forKey: ResultsWindow.storageKey)) == .thirtyDays)
     }
 }

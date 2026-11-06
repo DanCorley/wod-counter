@@ -224,4 +224,33 @@ final class ResultsServiceTests: XCTestCase {
         XCTAssertEqual(allHistory.count, 2)
         XCTAssertEqual(allHistory.first?.roundsCompleted, 20) // sorted reverse chronologically
     }
+
+    @MainActor
+    func testEmptySummaryHasNoBestTimeSentinel() {
+        let summary = service.summary(window: nil)
+        XCTAssertEqual(summary.workoutsCount, 0)
+        XCTAssertNil(summary.bestTime)
+    }
+
+    @MainActor
+    func testSummaryBestTimeIsLowestActiveTime() {
+        let fran = BenchmarkSeed.fran(in: context)
+        let now = Date()
+
+        context.insert(WorkoutRecord(
+            workout: fran, date: now.addingTimeInterval(-86400), kind: "time",
+            roundsCompleted: 1, totalReps: 90, elapsedTime: 320, pausedTime: 0,
+            activeTime: 320, isPR: false
+        ))
+        context.insert(WorkoutRecord(
+            workout: fran, date: now, kind: "time",
+            roundsCompleted: 1, totalReps: 90, elapsedTime: 300, pausedTime: 0,
+            activeTime: 300, isPR: true
+        ))
+
+        let summary = service.summary(for: fran)
+        XCTAssertEqual(summary.bestTime, 300)
+        // Optional bestTime is safe to feed to Format; no sentinel can reach it.
+        XCTAssertEqual(summary.bestTime.map(Format.duration), "05:00")
+    }
 }

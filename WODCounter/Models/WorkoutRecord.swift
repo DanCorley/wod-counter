@@ -11,6 +11,8 @@ import SwiftData
     var elapsedTime: TimeInterval
     var pausedTime: TimeInterval
     var activeTime: TimeInterval
+    /// Historical flag captured when the record was saved.
+    /// Deleting a record does not recompute or promote a later performance to PR.
     var isPR: Bool
     var notes: String?
 
