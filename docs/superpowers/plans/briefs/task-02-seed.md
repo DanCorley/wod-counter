@@ -17,7 +17,7 @@
 - **Modify:** `WODCounter/Support/SeedMigration.swift` (from Task 0) — call the factories here.
 
 ## Interfaces (produces)
-- Factory funcs, each returning a `Workout`: `cindy()`, `murph()`, and the full set: `frank()`, `angie()`, `grace()`, `diane()`, `helen()`, `dt()`.
+- Factory funcs, each returning a `Workout`: `cindy()`, `murph()`, and the full set: `fran()`, `angie()`, `grace()`, `diane()`, `helen()`, `dt()`.
 - (SeedMigration now produces the idempotent insert from these.)
 
 ## Workouts to build (exact prescriptions)
@@ -25,7 +25,7 @@
 |---|---|---|---|---|
 | `cindy()` | Girl | forTime | 20 | 1 block: [5 Pull-ups, 10 Push-ups, 15 Air Squats] (all Bodyweight) |
 | `murph()` | Hero | topTime | nil (unlimited) | 1 block, repeat=1: [100 Pull-ups, 200 Push-ups, 300 Air Squats] (Bodyweight) |
-| `frank()` | Hero | topTime | — | 3 blocks: {21 Thrusters(Barbell,"95 lb")+21 Pull-ups}, {15…}, {9…}. Thrusters category Power. |
+| `fran()` | Hero | topTime | — | 3 blocks: {21 Thrusters(Barbell,"95 lb")+21 Pull-ups}, {15…}, {9…}. Thrusters category Power. |
 | `angie()` | Hero | topTime | — | 1 block single pass: [100 Pull-ups, 100 Push-ups, 100 Sit-ups, 100 Air Squats] |
 | `grace()` | Girl | topTime | — | 1 block: [30 Clean & Jerk (Barbell,"135 lb")] category Strength |
 | `diane()` | Girl | topTime | — | 3 blocks: {21 Deadlifts(225)+21 HSPU},{15…},{9…}. Deadlift category Strength. |
@@ -41,7 +41,7 @@
 - [ ] **Step 2:** Modify `SeedMigration.applySeed(to:)` to call these factories and insert into `container.mainContext`, deduping Movements by `name` and `Workout`/`RoundBlock`/`Exercise` by derived identity so re-running is idempotent (no duplicates).
 - [ ] **Step 3:** Write `Tests/Support/BenchmarkSeedTests.swift` asserting correct block/rep counts — e.g. `assert(cindy().blocks.count == 1 && cindy().blocks[0].exercises.map { $0.reps } == [5,10,15])`; `dt().playTarget == 5` (or equivalent); `helen()` run exercise has `distance == "400 m"` and `reps == nil`. Commit.
 
-> Note: the plan has a typo `frank()`/`frank` — the WOD is **Fran** (`frank()` factory).
+> Note: the plan has a typo `frank()` — the WOD is **Fran** and the shipped factory is `fran()`.
 
 ## Acceptance
 - All eight WODs build correctly (counts/reps/block-structure) per the table. `displayLabel`s are pre-rendered. `SeedMigration` is idempotent (running twice inserts once). Tests green. One commit.

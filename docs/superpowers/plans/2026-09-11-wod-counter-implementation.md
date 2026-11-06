@@ -1,8 +1,22 @@
 # WOD Round Counter — Implementation Plan
 
+> **Historical record — not the current design.** This plan describes the original
+> sequential per-rep engine. The engine was later reworked (commit `5e2a197`) into a
+> **free-form task tracker**: every set is a task, reps can be logged against any task in
+> any order, and repeated blocks are pre-expanded into per-round tasks. Docs were
+> reconciled in `614db20`. Task 3's `advanceRep`/`playTarget`/`blockIndex`/`exerciseIndex`
+> contract is **historical**; the current engine uses `completeReps(taskID:count:)`.
+> Task 5 is `@Observable`, not `ObservableObject`.
+>
+> Tasks 0–9 below are implemented. For current behavior read the
+> [spec](../specs/2026-09-11-wod-counter-design.md) and
+> [handoff](../../implementation-handoff.md). Live work items are in
+> [docs/tickets/](../../tickets/README.md). iCloud sync is **not implemented**; the decision
+> is pending in [ticket 008](../../tickets/008-cloudkit-sync-decision.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build an Apple-native iOS app that runs predefined Girl/Hero WODs (or custom ones) in two modes — for-time (count rounds) and top-time (auto-stop at target) — using a per-rep cycling counter, with local SwiftData storage plus optional iCloud sync and a results/history view.
+**Goal:** Build an Apple-native iOS app that runs predefined Girl/Hero WODs (or custom ones) in two modes — for-time (count rounds) and top-time (auto-stop at target) — using a per-rep cycling counter, with local SwiftData storage and a results/history view. (Historical goal; iCloud sync was never implemented.)
 
 **Architecture:** SwiftUI views present state; a pure, unit-tested `WODSimulator` owns all WOD progression logic (round/block/rep transitions, descending & repeating schemes, pause/active-time); a `ResultsService` computes windowed stats and PRs; a `WorkoutTimerService` bridges the simulator to the real clock and persists results; SwiftData models a stable `Movement` catalog with per-WOD `Exercise` doses and explicit `RoundBlock`s.
 
@@ -14,7 +28,7 @@
 
 - Platform: iOS, Apple-native only (no web/Android). Deployment target **iOS 17.0**.
 - Stack: **SwiftUI + SwiftData + Swift Concurrency**.
-- Data: **offline-first**; workout data never leaves the device. **iCloud/CloudKit sync is opt-in** via Settings (public database, no account, no server).
+- Data: **offline-first**; workout data never leaves the device. **iCloud/CloudKit sync was planned but is not implemented**; the decision is pending in `docs/tickets/008-cloudkit-sync-decision.md`.
 - Model rule: `Movement`s are the shared catalog; `Exercise`s are per-WOD prescriptions with a **pre-rendered `displayLabel`** so synced data renders identically on every device (no re-formatting at render time).
 - YAGNI: ship only what the spec requires. Streaks/goals/Apple Watch/Health/Sign-In are deferred (spec §11).
 - TDD: every task ends green. Frequent commits (one per task), meaningful messages.
@@ -147,15 +161,15 @@ Each task = one focused deliverable with its own test cycle:
   - `startRest()` / `endRest()` / `advanceTime(_ dt, active:)` / `finish()` (`.manual`).
   - Derived: `currentBlock`, `currentExercise`, `currentRepProgress`, `isClockExpired`, `canAutoStop`, `snapshot`.
 
-- [ ] **Step 1:** Write `TimerEvent.swift`, `SessionSnapshot.swift`, and `WODSimulator.swift` adhering to the multi-block engine contract.
-- [ ] **Step 2:** Write `WODCounterTests/Sim/WODSimulatorTests.swift` covering:
+- [x] **Step 1:** Write `TimerEvent.swift`, `SessionSnapshot.swift`, and `WODSimulator.swift` adhering to the multi-block engine contract.
+- [x] **Step 2:** Write `WODCounterTests/Sim/WODSimulatorTests.swift` covering:
   - Cindy for-time: 5/10/15 reps cycling → roundsCompleted == 1; repeat cycles; loops until clock.
   - Murph top-time: 100/200/300 → `canAutoStop == true`; 1 round, active time tracks.
   - Fran top-time: 21/15/9 (3 blocks) → roundsCompleted == 3 and auto-stop.
   - DT top-time: 5 repeats of 1 block → roundsCompleted == 5 and auto-stop.
   - Helen for-time repeat=3 → 3 rounds counted.
   - Distanced-only exercise (`reps == nil`): advances with `effectiveReps == 1`.
-- [ ] **Step 3:** Run tests under `WODCounterTests/Sim/`, ensure green. Commit.
+- [x] **Step 3:** Run tests under `WODCounterTests/Sim/`, ensure green. Commit.
 
 ---
 
@@ -172,9 +186,9 @@ Each task = one focused deliverable with its own test cycle:
 - Consumes: Task 1 `WorkoutRecord`, `Workout`, `ExecutionMode`.
 - Produces: `Format` (duration/timer formatters), `WindowSummary`, `history(for:window:kind:)`, `summary(for:window:kind:)`, and `isNewPR(...)`.
 
-- [ ] **Step 1:** Write `Support/Format.swift` containing `duration(_ seconds:) -> String` and `timer(_ minutes:) -> String`.
-- [ ] **Step 2:** Implement `ResultsService(context:)`. `history(for workout:window:kind:)` queries `#Predicate<WorkoutRecord>` sorted descending by date. `summary(...)` calculates total count, PR count, best rounds, best active time, and average active time. `isNewPR(...)` detects if an attempt is better than prior bests.
-- [ ] **Step 3:** Write `WODCounterTests/Services/ResultsServiceTests.swift`: test window filtering (7/30/90 days), PR evaluation for both for-time and top-time records, and delta calculations. Run green. Commit.
+- [x] **Step 1:** Write `Support/Format.swift` containing `duration(_ seconds:) -> String` and `timer(_ minutes:) -> String`.
+- [x] **Step 2:** Implement `ResultsService(context:)`. `history(for workout:window:kind:)` queries `#Predicate<WorkoutRecord>` sorted descending by date. `summary(...)` calculates total count, PR count, best rounds, best active time, and average active time. `isNewPR(...)` detects if an attempt is better than prior bests.
+- [x] **Step 3:** Write `WODCounterTests/Services/ResultsServiceTests.swift`: test window filtering (7/30/90 days), PR evaluation for both for-time and top-time records, and delta calculations. Run green. Commit.
 
 ---
 
@@ -190,12 +204,12 @@ Each task = one focused deliverable with its own test cycle:
 
 **Interfaces:**
 - Consumes: Task 3 `WODSimulator`, `TimerEvent`, `SessionSnapshot`; Task 4 `ResultsService`; Task 1 models.
-- Produces: `WorkoutTimerService: ObservableObject`, `AppModel`, and `ServiceFactory`.
+- Produces: `WorkoutTimerService` (shipped as `@Observable`, not `ObservableObject`), `AppModel`, and `ServiceFactory`.
 
-- [ ] **Step 1:** Create `WorkoutTimerService` holding a `WODSimulator` and a `Task`-based 1-second ticker that advances time and republishes `SessionSnapshot`. Injectable clock for testability.
-- [ ] **Step 2:** On `finish()`: compute active vs paused time, evaluate PR with `ResultsService.isNewPR(...)`, construct `WorkoutRecord`, and persist via the injected completion hook.
-- [ ] **Step 3:** Write `AppModel` (`@Observable`, navigation state, `ResultsService` reference) and `ServiceFactory` (`makeTimerService(for:)` saving to `ModelContext`).
-- [ ] **Step 4:** Write `WODCounterTests/Services/WorkoutTimerServiceTests.swift` with fake clock: test ticking, pause accumulating, and record persistence. Run green. Commit.
+- [x] **Step 1:** Create `WorkoutTimerService` holding a `WODSimulator` and a `Task`-based 1-second ticker that advances time and republishes `SessionSnapshot`. Injectable clock for testability.
+- [x] **Step 2:** On `finish()`: compute active vs paused time, evaluate PR with `ResultsService.isNewPR(...)`, construct `WorkoutRecord`, and persist via the injected completion hook.
+- [x] **Step 3:** Write `AppModel` (`@Observable`, navigation state, `ResultsService` reference) and `ServiceFactory` (`makeTimerService(for:)` saving to `ModelContext`).
+- [x] **Step 4:** Write `WODCounterTests/Services/WorkoutTimerServiceTests.swift` with fake clock: test ticking, pause accumulating, and record persistence. Run green. Commit.
 
 ---
 
@@ -212,16 +226,16 @@ Each task = one focused deliverable with its own test cycle:
 - Consumes: Task 1 models, Task 4 `ResultsService`, Task 5 `AppModel` / `ServiceFactory`.
 - Produces: library navigation → detail → Start (routes to `TimerView`) and History (routes to `ResultsView`).
 
-- [ ] **Step 1:** `HomeView`: `@Query` all `Workout`; sort builtins first, then Custom; grouped by category ("Girl", "Hero", "Custom"); tap navigates to `WODDetailView(workout:)`.
-- [ ] **Step 2:** `WODDetailView`: shows name, description, category, mode symbol, scheme breakdown (each `RoundBlock` with `displayLabel`s), **Start** button, and **History** button.
-- [ ] **Step 3:** `SettingsView`: iCloud sync toggle (`@AppStorage`) with clean container reload semantics and time-window default selector.
-- [ ] **Step 4:** Build and test view navigation. Commit.
+- [x] **Step 1:** `HomeView`: `@Query` all `Workout`; sort builtins first, then Custom; grouped by category ("Girl", "Hero", "Custom"); tap navigates to `WODDetailView(workout:)`.
+- [x] **Step 2:** `WODDetailView`: shows name, description, category, mode symbol, scheme breakdown (each `RoundBlock` with `displayLabel`s), **Start** button, and **History** button.
+- [x] **Step 3:** `SettingsView`: iCloud toggle (`@AppStorage`) — a non-functional placeholder; sync is not implemented — plus the time-window default selector.
+- [x] **Step 4:** Build and test view navigation. Commit.
 
 ---
 
 ### Task 7: `TimerView` — the core screen
 
-**Goal:** Live timer with the per-rep cycling counter, pause/resume, rest indicator, and completion trigger.
+**Goal:** Live timer with the free-form task list, pause/resume, rest indicator, and completion trigger.
 
 **Files:**
 - Create: `WODCounter/Views/TimerView.swift`
@@ -230,9 +244,9 @@ Each task = one focused deliverable with its own test cycle:
 - Consumes: Task 5 `WorkoutTimerService`, `SessionSnapshot`; Task 4 `Format`.
 - Produces: interactive full-screen workout timer.
 
-- [ ] **Step 1:** Implement `TimerView` displaying prominent clock (countdown for for-time, count-up for top-time), current exercise `displayLabel`, and rep quota progress.
-- [ ] **Step 2:** Wire tap-to-advance rep button, Pause/Resume, and Finish controls.
-- [ ] **Step 3:** On finish/completion, present results sheet overlay. Test and smoke-run Cindy and Murph flows. Commit.
+- [x] **Step 1:** Implement `TimerView` displaying a prominent **count-up clock** (for-time adds a time-cap label), the grouped remaining-set list, and rep quota progress.
+- [x] **Step 2:** Wire tap-to-advance rep button, Pause/Resume, and Finish controls.
+- [x] **Step 3:** On finish/completion, present results sheet overlay. Test and smoke-run Cindy and Murph flows. Commit.
 
 ---
 
@@ -248,9 +262,9 @@ Each task = one focused deliverable with its own test cycle:
 - Consumes: Task 4 `ResultsService`, `Format`; Task 1 models.
 - Produces: results dashboard and shareable image card.
 
-- [ ] **Step 1:** Create `ResultsCardView` displaying workout badge, completed rounds or time, PR tag, and date.
-- [ ] **Step 2:** Create `ResultsView` with 7d/30d/90d/all window tabs, summary banner, per-WOD bests with Δ vs previous attempt, and Swift Charts progression graph.
-- [ ] **Step 3:** Test results filtering and share sheet integration. Commit.
+- [x] **Step 1:** Create `ResultsCardView` displaying workout badge, completed rounds or time, PR tag, and date.
+- [x] **Step 2:** Create `ResultsView` with 7d/30d/90d/all window tabs, summary banner, per-WOD bests with Δ vs previous attempt, and Swift Charts progression graph.
+- [x] **Step 3:** Test results filtering and share sheet integration. Commit.
 
 ---
 
@@ -265,9 +279,9 @@ Each task = one focused deliverable with its own test cycle:
 - Consumes: Task 1 models (`Movement`, `Exercise`, `RoundBlock`, `Workout`, `ExecutionMode`).
 - Produces: custom `Workout` stored in SwiftData.
 
-- [ ] **Step 1:** Build `CreateWODView`: select movements from catalog, set reps/weight/distance/units, set execution mode and time caps, configure repeat counts and rest intervals.
-- [ ] **Step 2:** Pre-render `Exercise.displayLabel` for every exercise, assemble `RoundBlock`s and `Workout`, and insert into `@Environment(\.modelContext)`.
-- [ ] **Step 3:** Verify that newly created WODs immediately appear under "Custom" on `HomeView` and can be run via `TimerView`. Run full test suite (`swift test`). Commit.
+- [x] **Step 1:** Build `CreateWODView`: select movements from catalog, set reps/weight/distance/units, set execution mode and time caps, configure repeat counts and rest intervals.
+- [x] **Step 2:** Pre-render `Exercise.displayLabel` for every exercise, assemble `RoundBlock`s and `Workout`, and insert into `@Environment(\.modelContext)`.
+- [x] **Step 3:** Verify that newly created WODs immediately appear under "Custom" on `HomeView` and can be run via `TimerView`. Run full test suite (`swift test`). Commit.
 
 ---
 

@@ -4,6 +4,7 @@
 - **Platform:** iOS (Apple-native)
 - **Stack:** SwiftUI + SwiftData + Swift Concurrency
 - **Version:** 1.1 spec (free-form task tracker supersedes the per-rep cycling counter)
+- **Authority:** This spec and `docs/implementation-handoff.md` describe current behavior. The plan and task briefs are historical records. Live work is tracked in `docs/tickets/`.
 
 ---
 
@@ -26,7 +27,7 @@ The predefined library follows the real **Girl** and **Hero** WOD catalog, suppo
 - **Free-form task tracker** that drives both modes: every exercise set (exercise × round) is a *task* with a remaining-rep count; the athlete logs reps against **any task in any order** via quick counters; rounds are tracked internally.
 - **Pause/Resume**; paused time tracked and subtracted from active time (for-time).
 - **Optional per-workout rest between rounds** (e.g. Barbara 5 rounds, 3 min rest); continuous WODs leave it off.
-- SwiftData local storage + **optional iCloud sync**.
+- SwiftData local storage. iCloud sync is **deferred to v1.1**; see `docs/tickets/008-cloudkit-sync-decision.md`.
 - **Historical results view:** time-window summary, per-WOD bests, PRs, "Δ vs last attempt", a progress chart.
 - Share card (Share Sheet / screenshot).
 
@@ -62,7 +63,7 @@ A concrete prescription that fills in the variable fields for one movement in on
 | weight | String? | e.g. "95 lb", "225 lb", "53/35 lb" (nullable) |
 | distance | String? | e.g. "1 mi", "400 m", "800 m" (nullable; runs/sprints/row/bike) |
 | distanceUnit | String? | derived from distance (mi/m) — optional explicit field |
-| restSeconds | Int? | inter-round / inter-set rest built into the WOD (nullable) |
+| restSeconds | Int? | deprecated; per-exercise rest is unsupported. Use block-level rest. |
 | displayLabel | String? | pre-rendered "21 Thrusters (95 lb)" so the UI never has to reformat — robust for sync |
 
 **Seeding note:** `Movement`s are the stable catalog; `Exercise`s are the per-WOD prescriptions. Adding a new WOD = add a few `Exercise` rows referencing existing `Movement`s. `displayLabel` is pre-rendered so synced data renders identically on every device without re-formatting logic.
@@ -79,45 +80,42 @@ A named set of `RoundBlock`s with a mode (predefined benchmark OR user-created).
 | blocks | [RoundBlock] | ordered; for-time blocks loop until clock, top-time play once |
 | isBuiltin | Bool | benchmark presets vs. user WODs |
 | createdAt / updatedAt | Date | |
-| category | String? | `Girl` / `Hero` / `Custom` — drives grouping and the seed library |
-| mode | `ExecutionMode` | `.forTime` or `.topTime` |
-| blocks | [RoundBlock] | ordered; for-time blocks loop until clock, top-time play once |
-| isBuiltin | Bool | benchmark presets vs. user WODs |
-| createdAt / updatedAt | Date | |
 
-**Rest between rounds** is an *optional per-workout* feature: set on each `Exercise.restSeconds` (or a `Workout.restBetweenRoundsSeconds`). Continuous WODs (Cindy, Fran, DT) leave it `nil`; spaced WODs (Barbara) set it. The field is present in v1; it only does something when populated.
+**Rest between rounds** is configured per block via `RoundBlock.restAfterBlock`. It applies after each completed play of that block, so with `repeatTimes > 1` it is rest between rounds, never after the workout's final round. Continuous WODs (Cindy, Fran, DT, Helen) leave it `nil`; spaced WODs (Barbara) can set it. Rest is measured in active time, so pausing does not consume it. `Exercise.restSeconds` is deprecated and unused.
 
-### `WorkoutAttempt` (a completed workout session)
+### ~~`WorkoutAttempt`~~ — intentionally merged into `WorkoutRecord` for v1
+
+> **Decision (v1):** a separate `WorkoutAttempt` table was rejected. `WorkoutRecord` is the single history row and carries the session metrics (`roundsCompleted`, `totalReps`, `elapsedTime`, `pausedTime`, `activeTime`, `isPR`, `notes`). There is no `attemptId` foreign key. This keeps history queries and the SwiftData graph simple.
+
+### `WorkoutRecord` (the single history row)
+
 | Field | Type | Notes |
 |---|---|---|
 | id | UUID | PK |
 | workout | relationship → `Workout` | FK |
-| resultType | String | `"rounds"` (for-time) or `"time"` (top-time) |
-| roundCount | Int | completed rounds (for-time) |
+| date | Date | session date (for windowed stats) |
+| kind | String | `"rounds"` / `"time"` |
+| roundsCompleted | Int | completed rounds (for-time) |
 | totalReps | Int | sum of reps completed (informative) |
 | elapsedTime | TimeInterval | total wall-clock from start to finish |
 | pausedTime | TimeInterval | accumulated paused duration |
 | activeTime | TimeInterval | elapsedTime − pausedTime |
-| finishedAt | Date | when session ended |
-| isPR | Bool | better than user's previous best for that workout |
+| isPR | Bool | historical flag; deleting a record does not recompute it |
 | notes | String? | |
 
-`activeTime = elapsedTime − pausedTime`, computed at save time (in the timer service / view model).
+`activeTime = elapsedTime − pausedTime`, computed at save time.
 
-### `WorkoutRecord` (higher-level row for history views / sync)
-> Prefer a separate `WorkoutRecord` table over denormalizing stats onto `Workout`: keeps `Workout` clean and makes "best rounds" an easy aggregate query.
+**History aggregation** is derived from `WorkoutRecord` by date window (7/30/90 days/all) → counts, PRs, best/latest deltas. The per-WOD delta is **best vs the latest chronological attempt in the window** (a single attempt has no delta); `WindowSummary.bestTime` is optional so an empty window has no sentinel duration.
 
-| Field | Type | Notes |
-|---|---|---|
-| id | UUID | PK |
-| workout | relationship → `Workout` | FK |
-| attemptId | UUID | FK to the `WorkoutAttempt` this record summarizes |
-| date | Date | session date (for windowed stats) |
-| kind | String | `"rounds"` / `"time"` |
-| value | Double | rounded for display (roundCount or activeTime) |
-| isPR | Bool | |
+### Session timeline (wall vs paused vs active)
 
-**History aggregation** is derived from `WorkoutRecord` by date window (7/30/90 days/all) → counts, PRs, deltas. This keeps queries simple and cheap.
+`SessionTimeline`, owned by `WorkoutTimerService`, derives all timing from timestamps supplied by the injected clock:
+
+- **wall** = finish/now − start time (includes pauses),
+- **paused** = accumulated pause intervals,
+- **active** = wall − paused.
+
+`WorkoutRecord.elapsedTime` = wall, `pausedTime` = paused, `activeTime` = active. The one-second ticker only refreshes the published snapshot and advances the engine by the real active delta since the last refresh; **it is not the time source**. A delayed or suspended ticker therefore cannot lose elapsed time. Pausing freezes the active clock (and the for-time cap) while wall time keeps accruing.
 
 ---
 
@@ -129,7 +127,7 @@ A named set of `RoundBlock`s with a mode (predefined benchmark OR user-created).
 3. Tap Start → timer screen: an initial **Start Workout** gate showing the scheme, then the count-up clock at 00:00 with the remaining-set list at round 0.
 4. Every set is listed as a task with its remaining rep count ("21 Thrusters (95 lb) — 21 left"). Tap a set to select it, then log reps with the **+1/+5/+10/+25** quick counters — in any order. Depleting every set in a block advances the round counter internally (one play of the current `RoundBlock`); AMRAP blocks regenerate a fresh wave and the clock keeps running.
 5. **Pause/Resume**: freezing the clock; paused seconds accumulate and are subtracted from active time. Rest-between-rounds (if any) is handled automatically when a round completes.
-6. Tap **Finish** → attempt saved (resultType = rounds, roundCount, elapsedTime, pausedTime, activeTime).
+6. Tap **Finish** → the session is saved as a `WorkoutRecord` (`kind = rounds`, `roundsCompleted`, `elapsedTime`, `pausedTime`, `activeTime`).
 
 ### Flow B — Start a top-time WOD
 1. Pick a top-time workout.
@@ -142,7 +140,7 @@ A named set of `RoundBlock`s with a mode (predefined benchmark OR user-created).
 2. Window default = **1 month**; user can switch between 7 / 30 / 90 days / all-time (saved as default preference).
 
 ### Flow D — Create a custom WOD
-1. "Create WOD" → pick movements from the catalog → set reps / weight / distance as needed → choose mode (for-time w/ minutes, or top-time) → optional rest between rounds → name it → Save (synced).
+1. "Create WOD" → pick movements from the catalog → set reps / weight / distance as needed → choose mode (for-time w/ minutes, or top-time) → optional rest between rounds → name it → Save locally (iCloud sync pending; see ticket 008).
 
 ---
 
@@ -152,7 +150,7 @@ A named set of `RoundBlock`s with a mode (predefined benchmark OR user-created).
 3. **Timer** — core screen: big count-up clock with time-cap label, free-form remaining-set tracker with quick counters, Pause/Resume, Finish; rest indicator when applicable.
 4. **Results / History** — window summary, PRs, chart, attempts drill-down.
 5. **Create WOD** — form for building custom workouts.
-6. **Settings** — iCloud sync toggle, time-window default, preferences.
+6. **Settings** — time-window default and local-storage status. iCloud sync is deferred to v1.1; see ticket 008.
 
 *No full mockups yet — review via visual companion if desired.*
 
@@ -170,8 +168,7 @@ A named set of `RoundBlock`s with a mode (predefined benchmark OR user-created).
 ┌───────────────────────────────────────────────┐
 │  Model layer (SwiftData @Model classes)         │
 │   Movement · Exercise · Workout ·               │
-│   WorkoutRecord · WorkoutAttempt                │
-│   + BenchmarkSeed (data source for built-ins)  │
+│   WorkoutRecord · BenchmarkSeed                │
 └───────────────────────────────────────────────┘
                        │  ModelContainer
 ┌───────────────────────────────────────────────┐
@@ -179,22 +176,22 @@ A named set of `RoundBlock`s with a mode (predefined benchmark OR user-created).
 │   WorkoutTimerService (clock, pause, rest,     │
 │   task tracker, auto-stop, active time)        │
 │   ResultsService (windowed aggregation/PRs)    │
-│   SyncService (optional iCloud CloudKit)        │
+│   SyncService (not implemented in v1)          │
 └───────────────────────────────────────────────┘
 ```
 
 - **Timer logic** lives in a `WorkoutTimerService` (actor/class) so the view stays declarative; it owns start/pause/resume/finish, the free-form task tracker, optional per-round rest, and active-time computation.
-- On **finish / auto-stop**, the service writes the `WorkoutAttempt` + `WorkoutRecord` via the `ModelContext`.
+- On **finish / auto-stop**, the service writes a single `WorkoutRecord` via the `ModelContext`.
 - **ResultsService** provides pure functions/queries for windowed stats, bests, and PR detection ("is this attempt better than the user's prior best for that workout").
-- **SyncService**: CloudKit-backed SwiftData container. Sync **opt-in** (Settings toggle); defaults to on per plan but graceful when unavailable/disabled.
+- **SyncService (deferred to v1.1):** iCloud sync is not part of v1; see `docs/tickets/008-cloudkit-sync-decision.md`. The app remains local-only; do not claim sync works.
 
 ---
 
 ## 7. Data & Sync
-- **Persistence:** SwiftData `ModelContainer` (in-memory + persistent).
-- **CloudKit sync:** Opt-in via Settings. Public database, no server, no account. Pre-rendered `Exercise.displayLabel` ensures identical rendering across devices.
-- **Offline-first:** all reads/writes local first; CloudKit mirrors in background. Workout data never leaves the device unless iCloud is enabled.
-- **Privacy:** default private; iCloud optional.
+- **Persistence:** SwiftData `ModelContainer` (in-memory + persistent), local-only in v1.
+- **iCloud sync:** **not available in v1; deferred to v1.1.** The fake Settings toggle has been removed. See `docs/tickets/008-cloudkit-sync-decision.md`.
+- **Offline-first:** all reads/writes local first. Workout data never leaves the device in v1.
+- **Privacy:** local-only in v1.
 
 ---
 
@@ -208,7 +205,7 @@ Movement taxonomy supported from the start: bodyweight, barbell (squat/clean&jer
 | **Cindy** | Girl | For-time | 5 Pull-ups, 10 Push-ups, 15 Air Squats (×N) | none |
 | **Murph** | Hero | Top-time | 100 Pull-ups, 200 Push-ups, 300 Air Squats (single pass) | none |
 | **Fran** | Girl | Top-time | Block A = 21 Thrusters (95 lb) + 21 Pull-ups; Block B = 15 of each; Block C = 9 of each | none |
-| **Angie** | Hero | Top-time | 100 Pull-ups, 100 Push-ups, 100 Sit-ups, 100 Air Squats (single pass) | none |
+| **Angie** | Girl | Top-time | 100 Pull-ups, 100 Push-ups, 100 Sit-ups, 100 Air Squats (single pass) | none |
 | **Grace** | Girl | Top-time | 30 Clean & Jerk (135/95 lb) | none |
 | **Diane** | Girl | Top-time | Block = 21 Deadlifts (225 lb) + 21 HSPU; ×3 (21-15-9) | none |
 | **Helen** | Girl | Top-time | 400 m Run, 21 Kettlebell Swings (53/35 lb), 12 Pull-ups (×3) | none |
@@ -217,7 +214,7 @@ Movement taxonomy supported from the start: bodyweight, barbell (squat/clean&jer
 ### Notes on the catalog
 - The library is a **seed source** (`BenchmarkSeed`). The full Girl catalog (~27) and Hero catalog (200+) exist as reference; seeding proceeds in phases (v1 ≈ table above), then Fran-family / additional Girls, then more Heroes.
 - **Murph variant:** canonical Hero Murph includes two 1 mi runs (1 mi run → 100/200/300 → 1 mi run, traditionally with a 20 lb vest). The v1 seed is the **bodyweight-only** 100/200/300 version; the run-based variant is supported (via the `Run` movement + distance) and can be seeded later.
-- **Rest between rounds:** seed set above is all continuous. Spaced WODs like **Barbara** (5 rounds, 3 min rest: 20 pull-ups / 30 push-ups / 40 sit-ups / 50 air squats) demonstrate the optional `restSeconds` feature and can be added in a later phase.
+- **Rest between rounds:** the seed set above is all continuous; Helen is continuous even though it repeats. Spaced WODs like **Barbara** (5 rounds, 3 min rest: 20 pull-ups / 30 push-ups / 40 sit-ups / 50 air squats) demonstrate the optional `RoundBlock.restAfterBlock` feature and can be added in a later phase.
 - Equipment & weight are core, not an afterthought — the movement catalog is intentionally wide so any Girl/Hero WOD can be added by filling `Exercise` rows.
 
 ---
@@ -233,9 +230,9 @@ Movement taxonomy supported from the start: bodyweight, barbell (squat/clean&jer
 - [ ] Can run Murph (top-time, bodyweight) and the timer auto-stops when every set is depleted, recording elapsed active time.
 - [ ] Can complete sets **out of program order** (e.g. finish squats before pull-ups in Murph) and the session still auto-stops correctly.
 - [ ] Can run a descending/multi-block WOD (Fran-style) where each block is a round and the session auto-stops.
-- [ ] Can build a custom WOD with reps + weight/distance + equipment + optional rest between rounds; it syncs (if iCloud on).
+- [ ] Can build a custom WOD with reps + weight/distance + equipment + optional rest between rounds; it saves locally (iCloud sync is deferred to v1.1; see ticket 008).
 - [ ] Results screen shows 7/30/90-day/all-time windows, per-WOD bests, PRs, Δ vs. last, a progress chart, and a share card.
-- [ ] iCloud sync is toggleable and, when enabled, propagates records across devices.
+- [ ] iCloud sync is **deferred to v1.1**. Option B (private CloudKit) remains tracked in `docs/tickets/008-cloudkit-sync-decision.md`; do not claim cross-device propagation.
 
 ## 11. Deferred Roadmap
 1. **v1.5:** Apple Health (write workout result), Apple Sign-In (optional).

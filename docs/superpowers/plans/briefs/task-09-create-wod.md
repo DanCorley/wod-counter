@@ -1,5 +1,9 @@
 # Task 9 — View: Create WOD (Custom Workout Builder)
 
+> **Historical claim.** Custom WODs save locally; iCloud sync is **not implemented** (decision
+> pending in [ticket 008](../../../tickets/008-cloudkit-sync-decision.md)). Editing shipped via
+> [ticket 009](../../../tickets/009-custom-wod-editing.md).
+
 **Deliverable:** An interactive builder form allowing users to compose, configure, and persist custom workouts from the movement catalog.
 
 ## Pointers
